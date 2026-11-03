@@ -83,7 +83,10 @@ func TestExportSessionReadsOnlyAKnownWorkspaceTranscript(t *testing.T) {
 	}
 	link := filepath.Join(SessionDirFor(root), "linked.jsonl")
 	if err := os.Symlink(outside, link); err != nil {
-		t.Fatal(err)
+		// Windows needs admin or Developer Mode for symlinks, so the
+		// escape-by-symlink case cannot be built everywhere. The refusal
+		// above is already verified for a plain outside path.
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 	linked := postExportSession(t, srv, link)
 	defer linked.Body.Close()

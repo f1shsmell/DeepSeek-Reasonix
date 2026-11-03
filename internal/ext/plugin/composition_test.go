@@ -44,7 +44,9 @@ func TestCompositionProcessStateIsPrivateAndConfinedToOwnedSubdirectory(t *testi
 func TestCompositionProcessStateRejectsSymlinkOwner(t *testing.T) {
 	base, outside := t.TempDir(), t.TempDir()
 	if err := os.Symlink(outside, filepath.Join(base, "sessions")); err != nil {
-		t.Fatal(err)
+		// The whole test is the symlink rejection; Windows needs admin or
+		// Developer Mode to build one.
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 	if _, err := CompositionProcessRoot(Spec{StateDir: base, ProcessStateDir: filepath.Join(base, "sessions", "session")}); err == nil {
 		t.Fatal("symlink process state accepted")

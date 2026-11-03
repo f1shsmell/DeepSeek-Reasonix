@@ -930,7 +930,9 @@ func TestRestoreConfigSnapshotPreservesSymlinkThroughUndo(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(dotfiles, dest); err != nil {
-		t.Fatal(err)
+		// Windows needs admin or Developer Mode to link an existing file, so
+		// the dotfiles contract cannot be exercised everywhere it applies.
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 	if err := RecordHealthyConfig("v1"); err != nil {
 		t.Fatal(err)
@@ -1034,7 +1036,9 @@ func TestRestoreConfigSnapshotCrossDeviceCleanupRestoresSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(dotfiles, dest); err != nil {
-		t.Fatal(err)
+		// Windows needs admin or Developer Mode to link an existing file, so
+		// the dotfiles contract cannot be exercised everywhere it applies.
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 	if err := RecordHealthyConfig("v1"); err != nil {
 		t.Fatal(err)
