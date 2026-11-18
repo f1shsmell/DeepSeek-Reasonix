@@ -27,7 +27,12 @@ import (
 	"reasonix/internal/platform/account"
 )
 
-const DefaultRelayURL = "wss://remote.reasonix.io"
+// DefaultRelayURL is deliberately empty. The hosted relay this constant used to
+// name is gone, and a build that falls back to it dials a host that no longer
+// resolves: the user sees a thirty-second timeout instead of the one sentence
+// that says what is actually missing. A deployment that wants a relay names it
+// in REASONIX_REMOTE_URL; without one, the host stays offline and says so.
+const DefaultRelayURL = ""
 
 const desktopResponseChunk = 24 << 10
 
@@ -35,12 +40,14 @@ var (
 	errAccountChanged = errors.New("remote cloud: account changed")
 	errRelayRefused   = errors.New("remote cloud: relay refused the connection")
 	errRelayInsecure  = errors.New("remote cloud: the relay address must start with wss://")
+	errRelayUnset     = errors.New("remote cloud: REASONIX_REMOTE_URL is not set")
 )
 
 type unavailableReason string
 
 const (
 	unavailableSignedOut        unavailableReason = "signed_out"
+	unavailableRelayUnset       unavailableReason = "relay_unset"
 	unavailableRelayUnreachable unavailableReason = "relay_unreachable"
 	unavailableRelayRefused     unavailableReason = "relay_refused"
 )
@@ -127,7 +134,11 @@ func New(client *account.Client, dialer *websocket.Dialer, relayURL, version str
 	if dialer == nil {
 		dialer = websocket.DefaultDialer
 	}
-	if strings.TrimSpace(relayURL) == "" {
+	// No fallback host. The empty case is a deployment nobody named, and it is
+	// answered by the connection attempt rather than papered over here, so the
+	// status carries `relay_unset` instead of a timeout against a dead domain.
+	relayURL = strings.TrimSpace(relayURL)
+	if relayURL == "" {
 		relayURL = DefaultRelayURL
 	}
 	name, _ := os.Hostname()
@@ -260,6 +271,9 @@ func unavailableReasonFor(err error) unavailableReason {
 	if errors.Is(err, account.ErrUnauthorized) {
 		return unavailableSignedOut
 	}
+	if errors.Is(err, errRelayUnset) {
+		return unavailableRelayUnset
+	}
 	if errors.Is(err, errRelayRefused) || errors.Is(err, errRelayInsecure) {
 		return unavailableRelayRefused
 	}
@@ -363,6 +377,9 @@ type controllerCommand struct {
 }
 
 func (h *Host) connect(ctx context.Context, token string, saved *identity, private *ecdh.PrivateKey) error {
+	if h.relayURL == "" {
+		return errRelayUnset
+	}
 	if !relaySecure(h.relayURL) {
 		return errRelayInsecure
 	}

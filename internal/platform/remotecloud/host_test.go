@@ -222,6 +222,7 @@ func TestUnavailableReasonIsTypedInsteadOfReadFromErrorText(t *testing.T) {
 		want unavailableReason
 	}{
 		{"signed out", account.ErrUnauthorized, unavailableSignedOut},
+		{"relay unset", fmt.Errorf("%w", errRelayUnset), unavailableRelayUnset},
 		{"relay refused", fmt.Errorf("%w: bad handshake", errRelayRefused), unavailableRelayRefused},
 		{"relay policy close", &websocket.CloseError{Code: websocket.ClosePolicyViolation}, unavailableRelayRefused},
 		{"unreachable", errors.New("dial tcp: network is unreachable"), unavailableRelayUnreachable},
