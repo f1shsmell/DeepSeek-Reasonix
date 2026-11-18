@@ -111,6 +111,8 @@ function cloudRemoteNote(status: CloudRemoteStatus | undefined): string {
     return t("remote.internet_access_requires_the_same");
   }
   switch (status?.reason) {
+    case "relay_unset":
+      return t("remote.the_relay_is_not_configured");
     case "relay_unreachable":
       return t("remote.the_relay_cannot_be_reached");
     case "relay_refused":

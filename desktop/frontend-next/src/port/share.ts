@@ -34,7 +34,7 @@ export interface CloudRemoteStatus {
   name?: string;
   online: boolean;
   error?: string;
-  reason?: "signed_out" | "relay_unreachable" | "relay_refused";
+  reason?: "signed_out" | "relay_unset" | "relay_unreachable" | "relay_refused";
 }
 
 // A paired device's answer about itself. Mirrors serve.DeviceSelf.

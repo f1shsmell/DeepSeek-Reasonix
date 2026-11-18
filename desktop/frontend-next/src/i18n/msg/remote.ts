@@ -179,6 +179,7 @@ export const REMOTE: Messages = {
   "remote.the_private_key_is_passphrase": { zh: "私钥已被口令锁定", en: "The private key is passphrase-locked" },
   "remote.the_relay_address_this_computer": { zh: "这台电脑使用的中继地址无法识别，请更新 Web Studio 后再试。", en: "The relay address this computer uses is not recognised. Update Web Studio and try again." },
   "remote.the_relay_cannot_be_reached": { zh: "中转服务暂时无法连接，请检查网络或代理设置后重试。", en: "The relay cannot be reached right now. Check your network or proxy settings and try again." },
+  "remote.the_relay_is_not_configured": { zh: "这台电脑还没有配置中转地址，请把 REASONIX_REMOTE_URL 指向你的自建服务后重启。", en: "This computer has no relay address yet. Point REASONIX_REMOTE_URL at your self-hosted service and restart." },
   "remote.the_relay_refused_this_connection": { zh: "中转拒绝了这次连接", en: "The relay refused this connection" },
   "remote.the_relay_refused_this_devices": { zh: "中转服务拒绝了这台设备的连接，请稍后重试。", en: "The relay refused this device's connection. Try again later." },
   "remote.the_relay_rejected_this_pages": { zh: "远程中转拒绝了当前网页的来源。请从 reasonix.io 打开 Web Studio 后再连接。", en: "The relay rejected this page's origin. Open Web Studio from reasonix.io, then connect." },

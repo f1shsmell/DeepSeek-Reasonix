@@ -105,6 +105,9 @@ it("shows the account-gated Internet QR before the optional LAN pairing code", a
 it.each([
   [undefined, "登录 Reasonix 账号后，可生成在外网也能使用的连接二维码。"],
   ["signed_out", "登录 Reasonix 账号后，可生成在外网也能使用的连接二维码。"],
+  // A machine with no relay configured must not be told to sign in: its
+  // answer is an unset address, and the fix is the environment variable.
+  ["relay_unset", "这台电脑还没有配置中转地址，请把 REASONIX_REMOTE_URL 指向你的自建服务后重启。"],
   ["relay_unreachable", "中转服务暂时无法连接，请检查网络或代理设置后重试。"],
   ["relay_refused", "中转服务拒绝了这台设备的连接，请稍后重试。"],
 ] as const)("explains why Internet access is unavailable: %s", async (reason, note) => {
@@ -113,7 +116,7 @@ it.each([
   render(<PhonePop hub={hub} />);
   await userEvent.click(await screen.findByRole("button", { name: "设备访问" }));
   expect(await screen.findByText(note)).toBeTruthy();
-  if (reason === "relay_unreachable" || reason === "relay_refused") {
+  if (reason === "relay_unset" || reason === "relay_unreachable" || reason === "relay_refused") {
     expect(screen.queryByText("登录 Reasonix 账号后，可生成在外网也能使用的连接二维码。")).toBeNull();
   }
 });
