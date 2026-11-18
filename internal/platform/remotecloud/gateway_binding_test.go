@@ -84,12 +84,21 @@ func TestAnHTTPSRelayOriginIsDialledOverWSS(t *testing.T) {
 		"https://relay.example.com/":     "wss://relay.example.com",
 		"  https://relay.example.com  ":  "wss://relay.example.com",
 		"https://relay.example.com:8443": "wss://relay.example.com:8443",
+		// The scheme is matched case-insensitively, because a person typing an
+		// address into an env var does not think of it as a token.
+		"HTTPS://relay.example.com": "wss://relay.example.com",
 		// Anything the rewrite does not understand is left for relaySecure to
 		// refuse, rather than silently turned into something dialable.
 		"wss://relay.example.com":       "wss://relay.example.com",
 		"http://relay.example.com":      "http://relay.example.com",
 		"https://relay.example.com/path": "https://relay.example.com/path",
-		"":                              "",
+		// Credentials, a query and a fragment are not part of an origin. Dropping
+		// them silently would dial a host the operator did not name, so the
+		// string is handed back untouched and refused downstream.
+		"https://user:pw@relay.example.com": "https://user:pw@relay.example.com",
+		"https://relay.example.com?x=1":     "https://relay.example.com?x=1",
+		"https://relay.example.com#f":       "https://relay.example.com#f",
+		"":                                  "",
 	} {
 		if got := normalizeRelayURL(raw); got != want {
 			t.Errorf("normalizeRelayURL(%q) = %q, want %q", raw, got, want)

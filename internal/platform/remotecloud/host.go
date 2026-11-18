@@ -195,10 +195,18 @@ func relaySecure(raw string) bool {
 func normalizeRelayURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" {
+	// The scheme is compared case-insensitively: an env var is typed by a
+	// person, not generated as a token, and `HTTPS://` names the same service.
+	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Host == "" {
 		return raw
 	}
 	if u.Path != "" && u.Path != "/" {
+		return raw
+	}
+	// Credentials, a query and a fragment are not part of an origin. Rewriting
+	// them away would dial a host the operator never named, so the string goes
+	// back untouched and relaySecure refuses it with its own message.
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return raw
 	}
 	return "wss://" + u.Host
