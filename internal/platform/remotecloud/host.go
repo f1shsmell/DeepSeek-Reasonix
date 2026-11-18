@@ -137,7 +137,7 @@ func New(client *account.Client, dialer *websocket.Dialer, relayURL, version str
 	// No fallback host. The empty case is a deployment nobody named, and it is
 	// answered by the connection attempt rather than papered over here, so the
 	// status carries `relay_unset` instead of a timeout against a dead domain.
-	relayURL = strings.TrimSpace(relayURL)
+	relayURL = normalizeRelayURL(strings.TrimSpace(relayURL))
 	if relayURL == "" {
 		relayURL = DefaultRelayURL
 	}
@@ -179,6 +179,29 @@ func relaySecure(raw string) bool {
 		return u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback())
 	}
 	return false
+}
+
+// normalizeRelayURL turns an https:// relay origin into the wss:// one a
+// WebSocket dial needs.
+//
+// The account service names a relay the way an origin is spelled everywhere
+// else — `https://relay.example.com` — and the phone client already rewrites
+// it the same way (`src/net/relay.ts`, relayUrl). Accepting only `wss://` here
+// meant the same grant that worked on a phone was refused by the desktop, and
+// the operator had to spell one address two ways in one deployment.
+//
+// Anything else is returned untouched: relaySecure still decides, so `ws://`
+// for a local fixture and a refusal for a public plaintext host keep working.
+func normalizeRelayURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return raw
+	}
+	if u.Path != "" && u.Path != "/" {
+		return raw
+	}
+	return "wss://" + u.Host
 }
 
 // SetGateway binds this machine to a gateway the person registered with the

@@ -75,6 +75,28 @@ func TestRelaySecureAdmitsWSSAndOnlyLoopbackWS(t *testing.T) {
 	}
 }
 
+// An https origin is how every other surface spells a relay, so the desktop
+// reads it the same way the phone client does instead of demanding a second
+// spelling of one address in one deployment.
+func TestAnHTTPSRelayOriginIsDialledOverWSS(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://relay.example.com":      "wss://relay.example.com",
+		"https://relay.example.com/":     "wss://relay.example.com",
+		"  https://relay.example.com  ":  "wss://relay.example.com",
+		"https://relay.example.com:8443": "wss://relay.example.com:8443",
+		// Anything the rewrite does not understand is left for relaySecure to
+		// refuse, rather than silently turned into something dialable.
+		"wss://relay.example.com":       "wss://relay.example.com",
+		"http://relay.example.com":      "http://relay.example.com",
+		"https://relay.example.com/path": "https://relay.example.com/path",
+		"":                              "",
+	} {
+		if got := normalizeRelayURL(raw); got != want {
+			t.Errorf("normalizeRelayURL(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
 func TestSetGatewayTrimsTheID(t *testing.T) {
 	h := New(account.New("", "test", nil), nil, "", "test")
 	h.SetGateway("  g1 \n")
