@@ -147,6 +147,7 @@ func TestUploadExpiresWhenNextPartOrAnyCommandArrivesLate(t *testing.T) {
 // real sealing, for tests that go through Host.handle as the relay would.
 type channel struct {
 	host         *Host
+	writer       *relayWriter
 	deviceWire   *websocket.Conn
 	controller   *websocket.Conn
 	cipher       *sessionCipher
@@ -177,9 +178,17 @@ func newChannel(t *testing.T, desktop DesktopService) *channel {
 		t.Fatal(err)
 	}
 	deviceWire := <-connections
+	ch := &channel{
+		host: &Host{name: "Home Mac", version: "test", desktop: desktop, presence: &presenceStub{}}, deviceWire: deviceWire, controller: controllerWire,
+		sessions: map[string]*controllerSession{}, deviceID: strings.Repeat("d", 64), connectionID: strings.Repeat("c", 32),
+	}
+	ch.writer = &relayWriter{conn: deviceWire}
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
+			for _, session := range ch.sessions {
+				session.stop()
+			}
 			controllerWire.Close()
 			deviceWire.Close()
 			close(done)
@@ -187,6 +196,7 @@ func newChannel(t *testing.T, desktop DesktopService) *channel {
 		})
 	}
 	t.Cleanup(stop)
+	ch.stop = stop
 	device, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -195,14 +205,11 @@ func newChannel(t *testing.T, desktop DesktopService) *channel {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ch.device = device
 	salt := make([]byte, 16)
 	_, _ = rand.Read(salt)
-	ch := &channel{
-		host: &Host{name: "Home Mac", version: "test", desktop: desktop, presence: &presenceStub{}}, deviceWire: deviceWire, controller: controllerWire,
-		device: device, stop: stop, sessions: map[string]*controllerSession{}, deviceID: strings.Repeat("d", 64), connectionID: strings.Repeat("c", 32),
-	}
 	greeting, _ := json.Marshal(hello{Version: protocolVersion, Type: "hello", PublicKey: base64.RawURLEncoding.EncodeToString(controller.PublicKey().Bytes()), Salt: base64.RawURLEncoding.EncodeToString(salt)})
-	if err := ch.host.handle(t.Context(), deviceWire, &identity{DeviceID: ch.deviceID}, device, ch.sessions, mustJSON(t, gatewayMessage{Type: "controller_message", ConnectionID: ch.connectionID, Payload: string(greeting)})); err != nil {
+	if err := ch.host.handle(t.Context(), ch.writer, &identity{DeviceID: ch.deviceID}, device, ch.sessions, mustJSON(t, gatewayMessage{Type: "controller_message", ConnectionID: ch.connectionID, Payload: string(greeting)})); err != nil {
 		t.Fatal(err)
 	}
 	back, _ := json.Marshal(hello{Version: protocolVersion, Type: "hello", PublicKey: base64.RawURLEncoding.EncodeToString(device.PublicKey().Bytes()), Salt: base64.RawURLEncoding.EncodeToString(salt)})
@@ -225,10 +232,20 @@ func (ch *channel) send(t *testing.T, command controllerCommand, scopes ...accou
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ch.host.handle(t.Context(), ch.deviceWire, &identity{DeviceID: ch.deviceID}, ch.device, ch.sessions, mustJSON(t, gatewayMessage{
+	if err := ch.host.handle(t.Context(), ch.writer, &identity{DeviceID: ch.deviceID}, ch.device, ch.sessions, mustJSON(t, gatewayMessage{
 		Type: "controller_message", ConnectionID: ch.connectionID, Scopes: scopes, Payload: wire,
 	})); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// barrier waits for every command sent so far to have run: the session executes
+// in arrival order, so a pong written after them means they are finished.
+func (ch *channel) barrier(t *testing.T) {
+	t.Helper()
+	ch.send(t, controllerCommand{Version: 1, Type: "ping", ID: "barrier"}, account.RemoteDesktop)
+	if reply := readDirected(t, ch.controller, ch.cipher); reply["type"] != "pong" {
+		t.Fatalf("barrier = %+v", reply)
 	}
 }
 
@@ -274,17 +291,20 @@ func TestTheHostAdvertisesUploadAndRunsTheWholeOnlyAfterTheLastPart(t *testing.T
 	}
 	for i, p := range parts {
 		ch.send(t, p, account.RemoteDesktop)
-		if i < len(parts)-1 && len(desktop.seen()) != 0 {
-			t.Fatalf("the desktop ran after part %d of %d", i, len(parts))
+		if i == len(parts)-2 {
+			ch.barrier(t)
+			if len(desktop.seen()) != 0 {
+				t.Fatalf("the desktop ran before the last part: %+v", desktop.seen())
+			}
 		}
-	}
-	got := desktop.seen()
-	if len(got) != 1 || got[0].Method != http.MethodPost || got[0].Path != "/rt/r1/attachments" || !bytes.Equal(got[0].Body, body) {
-		t.Fatalf("desktop saw %d requests; first %+v", len(got), got)
 	}
 	reply := readDirected(t, ch.controller, ch.cipher)
 	if reply["type"] != "desktop.response" || reply["id"] != "up-1" || reply["done"] != true {
 		t.Fatalf("reply = %+v", reply)
+	}
+	got := desktop.seen()
+	if len(got) != 1 || got[0].Method != http.MethodPost || got[0].Path != "/rt/r1/attachments" || !bytes.Equal(got[0].Body, body) {
+		t.Fatalf("desktop saw %d requests; first %+v", len(got), got)
 	}
 }
 
@@ -314,8 +334,11 @@ func TestAnUploadWithoutTheDesktopScopeIsRefusedAndHoldsNothing(t *testing.T) {
 	if reply["type"] != "error" || len(desktop.seen()) != 0 {
 		t.Fatalf("reply = %+v, desktop saw %d", reply, len(desktop.seen()))
 	}
-	if ch.sessions[ch.connectionID].uploads.current != nil {
-		t.Fatal("a refused upload left bytes held")
+	// Nothing may be held: a continuation of the refused upload has no first
+	// part to continue from, so it must be abandoned rather than accepted.
+	ch.send(t, parts[1], account.RemoteDesktop)
+	if reply := readDirected(t, ch.controller, ch.cipher); reply["type"] != "error" {
+		t.Fatalf("a refused upload left bytes held: %+v", reply)
 	}
 }
 
@@ -343,10 +366,8 @@ func TestEndingTheControllerReleasesAHeldUploadAndStartsNothingToLeak(t *testing
 	for range 20 {
 		ch := newChannel(t, desktop)
 		ch.send(t, uploadParts("held", bytes.Repeat([]byte("s"), uploadPartMax*3))[0], account.RemoteDesktop)
-		if ch.sessions[ch.connectionID].uploads.current == nil {
-			t.Fatal("fixture: the upload was not held")
-		}
-		if err := ch.host.handle(t.Context(), ch.deviceWire, &identity{DeviceID: ch.deviceID}, ch.device, ch.sessions, mustJSON(t, gatewayMessage{Type: "controller_disconnected", ConnectionID: ch.connectionID})); err != nil {
+		ch.barrier(t)
+		if err := ch.host.handle(t.Context(), ch.writer, &identity{DeviceID: ch.deviceID}, ch.device, ch.sessions, mustJSON(t, gatewayMessage{Type: "controller_disconnected", ConnectionID: ch.connectionID})); err != nil {
 			t.Fatal(err)
 		}
 		if _, held := ch.sessions[ch.connectionID]; held {

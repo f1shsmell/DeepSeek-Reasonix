@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,11 +19,11 @@ import (
 )
 
 type countingDesktop struct {
-	calls int
+	calls atomic.Int64
 }
 
 func (d *countingDesktop) CloudDesktop(_ context.Context, request DesktopRequest, _ string) (DesktopResponse, error) {
-	d.calls++
+	d.calls.Add(1)
 	return DesktopResponse{Status: http.StatusOK, ContentType: "text/plain", Body: []byte(request.Method)}, nil
 }
 
@@ -107,6 +108,7 @@ func TestControllerSessionsSurviveADeviceReconnect(t *testing.T) {
 		dialer: websocket.DefaultDialer, relayURL: url, token: func() string { return "token" },
 		desktop: desktop, presence: presence, disconnect: make(chan controllerDisconnect),
 	}
+	t.Cleanup(host.dropControllers)
 	connectionID := strings.Repeat("c", 32)
 	greeting, channel := controllerHello(t, device, deviceID)
 
@@ -150,8 +152,8 @@ func TestControllerSessionsSurviveADeviceReconnect(t *testing.T) {
 	}
 	sendController(t, relay, connectionID, resent)
 	again := readDirected(t, relay, channel)
-	if again["body"] != answer["body"] || desktop.calls != 1 {
-		t.Fatalf("resent request ran %d times; answers %+v / %+v", desktop.calls, answer, again)
+	if again["body"] != answer["body"] || desktop.calls.Load() != 1 {
+		t.Fatalf("resent request ran %d times; answers %+v / %+v", desktop.calls.Load(), answer, again)
 	}
 	if len(presence.disconnected) != 0 {
 		t.Fatalf("controller was reported gone across a reconnect: %v", presence.disconnected)

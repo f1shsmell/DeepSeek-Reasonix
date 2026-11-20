@@ -139,7 +139,13 @@ func TestHandshakeAndPingCrossTheDirectedEncryptedChannel(t *testing.T) {
 	presence := &presenceStub{}
 	host := &Host{name: "Home Mac", version: "2.20.1", desktop: &desktopStub{body: desktopBody}, presence: presence}
 	sessions := make(map[string]*controllerSession)
-	if err := host.handle(t.Context(), deviceWire, &identity{DeviceID: deviceID}, device, sessions, mustJSON(t, gatewayMessage{
+	t.Cleanup(func() {
+		for _, session := range sessions {
+			session.stop()
+		}
+	})
+	writer := &relayWriter{conn: deviceWire}
+	if err := host.handle(t.Context(), writer, &identity{DeviceID: deviceID}, device, sessions, mustJSON(t, gatewayMessage{
 		Type: "controller_message", ConnectionID: connectionID, Payload: string(greeting),
 	})); err != nil {
 		t.Fatal(err)
@@ -165,7 +171,7 @@ func TestHandshakeAndPingCrossTheDirectedEncryptedChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := host.handle(t.Context(), deviceWire, &identity{DeviceID: deviceID}, device, sessions, mustJSON(t, gatewayMessage{
+	if err := host.handle(t.Context(), writer, &identity{DeviceID: deviceID}, device, sessions, mustJSON(t, gatewayMessage{
 		Type: "controller_message", ConnectionID: connectionID, Payload: ping,
 	})); err != nil {
 		t.Fatal(err)
@@ -184,7 +190,7 @@ func TestHandshakeAndPingCrossTheDirectedEncryptedChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := host.handle(t.Context(), deviceWire, &identity{DeviceID: deviceID}, device, sessions, mustJSON(t, gatewayMessage{
+	if err := host.handle(t.Context(), writer, &identity{DeviceID: deviceID}, device, sessions, mustJSON(t, gatewayMessage{
 		Type: "controller_message", ConnectionID: connectionID, Scopes: []account.RemoteCapability{account.RemoteDesktop}, Payload: desktopRequest,
 	})); err != nil {
 		t.Fatal(err)
