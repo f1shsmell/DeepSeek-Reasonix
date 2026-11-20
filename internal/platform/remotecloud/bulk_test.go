@@ -13,6 +13,11 @@ import (
 
 func (r *muxRig) binary(t *testing.T, channel *sessionCipher, connectionID string, index int, part []byte) {
 	t.Helper()
+	r.binaryWithScopes(t, channel, connectionID, []account.RemoteCapability{account.RemoteDesktop}, index, part)
+}
+
+func (r *muxRig) binaryWithScopes(t *testing.T, channel *sessionCipher, connectionID string, scopes []account.RemoteCapability, index int, part []byte) {
+	t.Helper()
 	framed := make([]byte, 4+len(part))
 	binary.BigEndian.PutUint32(framed[:4], uint32(index))
 	copy(framed[4:], part)
@@ -22,7 +27,7 @@ func (r *muxRig) binary(t *testing.T, channel *sessionCipher, connectionID strin
 	}
 	r.dispatch(t, gatewayMessage{
 		Type: "controller_message", ConnectionID: connectionID,
-		Scopes: []account.RemoteCapability{account.RemoteDesktop}, Payload: payload,
+		Scopes: scopes, Payload: payload,
 	})
 }
 
@@ -141,7 +146,7 @@ func TestBulkRefusedWithoutTheCapability(t *testing.T) {
 	}
 }
 
-func TestBulkNeedsTheDesktopScope(t *testing.T) {
+func TestBulkNeedsAScopeThatCoversThePath(t *testing.T) {
 	desktop := &recordingDesktop{}
 	rig := newMuxRig(t, &Host{desktop: desktop})
 	connectionID := strings.Repeat("c", 32)
@@ -154,10 +159,10 @@ func TestBulkNeedsTheDesktopScope(t *testing.T) {
 	}
 	rig.dispatch(t, gatewayMessage{
 		Type: "controller_message", ConnectionID: connectionID,
-		Scopes: []account.RemoteCapability{account.RemoteFiles}, Payload: payload,
+		Scopes: []account.RemoteCapability{account.RemoteTasks}, Payload: payload,
 	})
 	if answer := readDirected(t, rig.controller, channel); answer["type"] != "error" {
-		t.Fatalf("bulk.open without desktop scope = %+v", answer)
+		t.Fatalf("bulk.open without a covering scope = %+v", answer)
 	}
 	if len(desktop.seen()) != 0 {
 		t.Fatal("desktop ran a request the scope refused")

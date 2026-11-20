@@ -45,7 +45,7 @@ func (h *Host) bulkOpen(s *controllerSession, cmd sessionCommand) {
 			_ = writeDirected(cmd.writer, s.connectionID, reply)
 		}
 	}
-	if h.desktop == nil || !hasScope(cmd.scopes, account.RemoteDesktop) {
+	if h.desktop == nil || !tunnelAllowed(cmd.scopes, command.Path) {
 		s.uploads.drop(command.ID)
 		fail("desktop access is unavailable")
 		return
@@ -67,7 +67,7 @@ func (h *Host) bulkOpen(s *controllerSession, cmd sessionCommand) {
 
 func (h *Host) bulkPart(ctx context.Context, s *controllerSession, cmd sessionCommand) {
 	cur := s.uploads.current
-	if h.desktop == nil || !hasScope(cmd.scopes, account.RemoteDesktop) {
+	if h.desktop == nil || (cur != nil && !tunnelAllowed(cmd.scopes, cur.path)) {
 		if cur != nil {
 			s.uploads.drop(cur.id)
 			// Say so: a silent drop leaves the controller's upload waiting out

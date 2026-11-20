@@ -146,13 +146,18 @@ func (r *muxRig) greet(t *testing.T, connectionID string, capabilities map[strin
 
 func (r *muxRig) command(t *testing.T, channel *sessionCipher, connectionID string, command controllerCommand) {
 	t.Helper()
+	r.commandWithScopes(t, channel, connectionID, []account.RemoteCapability{account.RemoteDesktop}, command)
+}
+
+func (r *muxRig) commandWithScopes(t *testing.T, channel *sessionCipher, connectionID string, scopes []account.RemoteCapability, command controllerCommand) {
+	t.Helper()
 	payload, err := channel.seal(command)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.dispatch(t, gatewayMessage{
 		Type: "controller_message", ConnectionID: connectionID,
-		Scopes: []account.RemoteCapability{account.RemoteDesktop}, Payload: payload,
+		Scopes: scopes, Payload: payload,
 	})
 }
 

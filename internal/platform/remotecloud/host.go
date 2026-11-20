@@ -620,7 +620,7 @@ func (h *Host) desktopCommand(
 	scopes []account.RemoteCapability,
 	command controllerCommand,
 ) error {
-	if h.desktop == nil || !hasScope(scopes, account.RemoteDesktop) {
+	if h.desktop == nil || !tunnelAllowed(scopes, command.Path) {
 		return h.writeDesktopError(writer, session, connectionID, command.ID, "desktop access is unavailable")
 	}
 	body, err := base64.RawURLEncoding.DecodeString(command.Body)
@@ -642,7 +642,13 @@ func (h *Host) uploadPart(
 	scopes []account.RemoteCapability,
 	command controllerCommand,
 ) error {
-	if h.desktop == nil || !hasScope(scopes, account.RemoteDesktop) {
+	// Later parts may omit the path; the held upload's path is the one that
+	// was admitted, so the check follows it on every part.
+	path := command.Path
+	if cur := session.uploads.current; cur != nil && cur.id == command.ID {
+		path = cur.path
+	}
+	if h.desktop == nil || !tunnelAllowed(scopes, path) {
 		session.uploads.drop(command.ID)
 		return h.writeDesktopError(writer, session.cipher, connectionID, command.ID, "desktop access is unavailable")
 	}
