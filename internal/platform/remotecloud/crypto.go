@@ -30,6 +30,9 @@ type sealedMessage struct {
 	Version    int    `json:"v"`
 	Nonce      string `json:"nonce"`
 	Ciphertext string `json:"ciphertext"`
+	// Bin marks a plaintext that is raw bytes, not JSON: the bulk lane's
+	// parts. The envelope itself stays JSON text either way.
+	Bin bool `json:"bin,omitempty"`
 }
 
 type sessionCipher struct {
@@ -82,12 +85,22 @@ func newSessionCipher(private *ecdh.PrivateKey, deviceID, payload string) (*sess
 }
 
 func (s *sessionCipher) seal(value any) (string, error) {
-	s.sealMu.Lock()
-	defer s.sealMu.Unlock()
 	plain, err := json.Marshal(value)
 	if err != nil {
 		return "", err
 	}
+	return s.sealPlain(plain, false)
+}
+
+// sealBytes seals raw bytes for the bulk lane: a file chunk crosses without
+// being wrapped in JSON or base64 first, so only the envelope inflates it.
+func (s *sessionCipher) sealBytes(plain []byte) (string, error) {
+	return s.sealPlain(plain, true)
+}
+
+func (s *sessionCipher) sealPlain(plain []byte, bin bool) (string, error) {
+	s.sealMu.Lock()
+	defer s.sealMu.Unlock()
 	nonce := make([]byte, s.aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return "", err
@@ -96,37 +109,62 @@ func (s *sessionCipher) seal(value any) (string, error) {
 		Version:    protocolVersion,
 		Nonce:      base64.RawURLEncoding.EncodeToString(nonce),
 		Ciphertext: base64.RawURLEncoding.EncodeToString(s.aead.Seal(nil, nonce, plain, s.aad)),
+		Bin:        bin,
 	}
 	encoded, err := json.Marshal(wire)
 	return string(encoded), err
 }
 
 func (s *sessionCipher) open(payload string, out any) error {
-	var wire sealedMessage
-	if err := json.Unmarshal([]byte(payload), &wire); err != nil {
+	plain, bin, err := s.openPlain(payload)
+	if err != nil {
 		return err
 	}
+	if bin {
+		return errors.New("remote cloud: binary message on the command lane")
+	}
+	return json.Unmarshal(plain, out)
+}
+
+// openBytes opens one bulk part. A JSON message offered as a part is refused:
+// the lanes must not be interchangeable, or a command could pose as bytes.
+func (s *sessionCipher) openBytes(payload string) ([]byte, error) {
+	plain, bin, err := s.openPlain(payload)
+	if err != nil {
+		return nil, err
+	}
+	if !bin {
+		return nil, errors.New("remote cloud: command message on the bulk lane")
+	}
+	return plain, nil
+}
+
+func (s *sessionCipher) openPlain(payload string) ([]byte, bool, error) {
+	var wire sealedMessage
+	if err := json.Unmarshal([]byte(payload), &wire); err != nil {
+		return nil, false, err
+	}
 	if wire.Version != protocolVersion {
-		return errors.New("remote cloud: unsupported message version")
+		return nil, false, errors.New("remote cloud: unsupported message version")
 	}
 	if _, duplicate := s.seen[wire.Nonce]; duplicate {
-		return errors.New("remote cloud: replayed message")
+		return nil, false, errors.New("remote cloud: replayed message")
 	}
 	nonce, err := base64.RawURLEncoding.DecodeString(wire.Nonce)
 	if err != nil || len(nonce) != s.aead.NonceSize() {
-		return errors.New("remote cloud: invalid message nonce")
+		return nil, false, errors.New("remote cloud: invalid message nonce")
 	}
 	ciphertext, err := base64.RawURLEncoding.DecodeString(wire.Ciphertext)
 	if err != nil {
-		return errors.New("remote cloud: invalid ciphertext")
+		return nil, false, errors.New("remote cloud: invalid ciphertext")
 	}
 	plain, err := s.aead.Open(nil, nonce, ciphertext, s.aad)
 	if err != nil {
-		return errors.New("remote cloud: message authentication failed")
+		return nil, false, errors.New("remote cloud: message authentication failed")
 	}
 	if len(s.seen) >= 256 {
 		clear(s.seen)
 	}
 	s.seen[wire.Nonce] = struct{}{}
-	return json.Unmarshal(plain, out)
+	return plain, wire.Bin, nil
 }

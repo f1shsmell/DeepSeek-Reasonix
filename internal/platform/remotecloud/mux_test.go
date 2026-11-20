@@ -323,11 +323,21 @@ func TestMuxCreditGrantReplenishesTheStream(t *testing.T) {
 	}
 	stub.frames <- EventFrame{Seq: 2, Data: data}
 	rig.command(t, channel, connectionID, controllerCommand{Version: 1, Type: "mux.credit", ID: "s1", Credit: 1024})
-	ack := readDirected(t, rig.controller, channel)
-	if ack["type"] != "mux.credit" || ack["credit"] != float64(1024) {
+	// The ack and the frame it unblocks race for the writer; the contract
+	// promises both, not an order between them.
+	var ack, frame map[string]any
+	for range 2 {
+		answer := readDirected(t, rig.controller, channel)
+		if answer["type"] == "mux.credit" {
+			ack = answer
+		} else {
+			frame = answer
+		}
+	}
+	if ack == nil || ack["credit"] != float64(1024) {
 		t.Fatalf("credit ack = %+v", ack)
 	}
-	if frame := readDirected(t, rig.controller, channel); frame["seq"] != float64(2) {
+	if frame == nil || frame["seq"] != float64(2) {
 		t.Fatalf("frame after replenishment = %+v", frame)
 	}
 
