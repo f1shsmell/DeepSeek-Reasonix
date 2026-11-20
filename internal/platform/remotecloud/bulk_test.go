@@ -248,7 +248,9 @@ func TestBulkPartScopeFailureTellsTheController(t *testing.T) {
 
 	// A part whose scopes cannot reach the desktop used to drop the upload
 	// silently, and the controller waited out its watchdog for parts that
-	// would never land. The upload fails with a typed error now.
+	// would never land. The upload fails with a typed error now. The files
+	// scope legitimately reaches the attachments path, so a task-scoped part
+	// is what gets refused.
 	framed := make([]byte, 4+3)
 	binary.BigEndian.PutUint32(framed[:4], 0)
 	copy(framed[4:], []byte("abc"))
@@ -258,7 +260,7 @@ func TestBulkPartScopeFailureTellsTheController(t *testing.T) {
 	}
 	if err := rig.host.handle(t.Context(), rig.writer, rig.saved, rig.private, rig.sessions, mustJSON(t, gatewayMessage{
 		Type: "controller_message", ConnectionID: connectionID,
-		Scopes: []account.RemoteCapability{account.RemoteFiles}, Payload: payload,
+		Scopes: []account.RemoteCapability{account.RemoteTasks}, Payload: payload,
 	})); err != nil {
 		t.Fatal(err)
 	}

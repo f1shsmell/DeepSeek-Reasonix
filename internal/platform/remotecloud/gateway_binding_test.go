@@ -89,8 +89,8 @@ func TestAnHTTPSRelayOriginIsDialledOverWSS(t *testing.T) {
 		"HTTPS://relay.example.com": "wss://relay.example.com",
 		// Anything the rewrite does not understand is left for relaySecure to
 		// refuse, rather than silently turned into something dialable.
-		"wss://relay.example.com":       "wss://relay.example.com",
-		"http://relay.example.com":      "http://relay.example.com",
+		"wss://relay.example.com":        "wss://relay.example.com",
+		"http://relay.example.com":       "http://relay.example.com",
 		"https://relay.example.com/path": "https://relay.example.com/path",
 		// Credentials, a query and a fragment are not part of an origin. Dropping
 		// them silently would dial a host the operator did not name, so the
