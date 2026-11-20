@@ -74,7 +74,9 @@ type Host struct {
 	token      func() string
 	tasks      TaskService
 	desktop    DesktopService
+	events     EventService
 	presence   ControllerPresence
+	muxTrace   bool
 	disconnect chan controllerDisconnect
 
 	link relayLink
@@ -122,14 +124,6 @@ type ControllerPresence interface {
 	CloudControllerDisconnected(string)
 }
 
-type controllerSession struct {
-	cipher  *sessionCipher
-	ordinal int
-	nonce   string
-	lastSeq int64
-	uploads uploads
-}
-
 func New(client *account.Client, dialer *websocket.Dialer, relayURL, version string, tasks ...TaskService) *Host {
 	if dialer == nil {
 		dialer = websocket.DefaultDialer
@@ -156,6 +150,7 @@ func New(client *account.Client, dialer *websocket.Dialer, relayURL, version str
 	if len(tasks) > 0 {
 		host.tasks = tasks[0]
 		host.desktop, _ = tasks[0].(DesktopService)
+		host.events, _ = tasks[0].(EventService)
 		host.presence, _ = tasks[0].(ControllerPresence)
 	}
 	return host
@@ -181,17 +176,10 @@ func relaySecure(raw string) bool {
 	return false
 }
 
-// normalizeRelayURL turns an https:// relay origin into the wss:// one a
-// WebSocket dial needs.
-//
-// The account service names a relay the way an origin is spelled everywhere
-// else — `https://relay.example.com` — and the phone client already rewrites
-// it the same way (`src/net/relay.ts`, relayUrl). Accepting only `wss://` here
-// meant the same grant that worked on a phone was refused by the desktop, and
-// the operator had to spell one address two ways in one deployment.
-//
-// Anything else is returned untouched: relaySecure still decides, so `ws://`
-// for a local fixture and a refusal for a public plaintext host keep working.
+// normalizeRelayURL rewrites an https:// relay origin to the wss:// a dial
+// needs, the same rewrite the phone client does (src/net/relay.ts, relayUrl),
+// so one grant works spelled one way. Anything else is returned untouched:
+// relaySecure still decides, keeping local ws:// fixtures working.
 func normalizeRelayURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
@@ -217,6 +205,9 @@ func normalizeRelayURL(raw string) string {
 // account service uses to scope the gateway's token to this device. Call it
 // before Run.
 func (h *Host) SetGateway(id string) { h.gatewayID = strings.TrimSpace(id) }
+
+// SetMuxTrace logs each pushed frame; the host reads the env once at startup.
+func (h *Host) SetMuxTrace(on bool) { h.muxTrace = on }
 
 func (h *Host) DisconnectController(id string) error {
 	id = strings.TrimSpace(id)
@@ -277,7 +268,7 @@ func (h *Host) Run(ctx context.Context) {
 		}
 		if errors.Is(err, errAccountChanged) {
 			h.dropControllers()
-			h.link.replay = replayCache{}
+			h.link.replay.reset()
 		}
 		h.suspend(time.Now())
 		status := h.Status()
@@ -405,6 +396,11 @@ type controllerCommand struct {
 	Total   int    `json:"total,omitempty"`
 	Session string `json:"session,omitempty"`
 	Seq     int64  `json:"seq,omitempty"`
+	// Runtime, After, Attach and Credit drive the mux push lane; see mux.go.
+	Runtime string `json:"runtime,omitempty"`
+	After   int64  `json:"after,omitempty"`
+	Attach  bool   `json:"attach,omitempty"`
+	Credit  int64  `json:"credit,omitempty"`
 }
 
 func (h *Host) connect(ctx context.Context, token string, saved *identity, private *ecdh.PrivateKey) error {
@@ -431,32 +427,17 @@ func (h *Host) connect(ctx context.Context, token string, saved *identity, priva
 	defer close(done)
 	messages := make(chan []byte, 1)
 	readErr := make(chan error, 1)
-	go func() {
-		for {
-			kind, payload, err := conn.ReadMessage()
-			if err != nil {
-				select {
-				case readErr <- err:
-				case <-done:
-				}
-				return
-			}
-			if kind != websocket.TextMessage {
-				select {
-				case readErr <- errors.New("remote cloud: relay sent a binary message"):
-				case <-done:
-				}
-				return
-			}
-			select {
-			case messages <- payload:
-			case <-done:
-				return
-			}
-		}
-	}()
+	go readRelay(conn, messages, readErr, done)
 
 	sessions := h.adopt(saved.DeviceID)
+	writer := &relayWriter{conn: conn}
+	// A lost connection ends every push subscription; the sessions themselves
+	// stay resumable for the grace period, and the controller reopens streams.
+	defer func() {
+		for _, session := range sessions {
+			session.cancelPush()
+		}
+	}()
 	pingTicker := time.NewTicker(20 * time.Second)
 	tokenTicker := time.NewTicker(time.Second)
 	heartbeat := ""
@@ -477,7 +458,7 @@ func (h *Host) connect(ctx context.Context, token string, saved *identity, priva
 				return err
 			}
 			if heartbeat != "" {
-				if err := conn.WriteMessage(websocket.TextMessage, []byte(heartbeat)); err != nil {
+				if err := writer.write([]byte(heartbeat)); err != nil {
 					return err
 				}
 			}
@@ -490,7 +471,7 @@ func (h *Host) connect(ctx context.Context, token string, saved *identity, priva
 				"type": "disconnect_controller", "connectionId": request.id,
 			})
 			if err == nil {
-				err = conn.WriteMessage(websocket.TextMessage, wire)
+				err = writer.write(wire)
 			}
 			if err == nil {
 				h.forgetController(request.id)
@@ -505,9 +486,36 @@ func (h *Host) connect(ctx context.Context, token string, saved *identity, priva
 				}
 				continue
 			}
-			if err := h.handle(ctx, conn, saved, private, sessions, payload); err != nil {
+			if err := h.handle(ctx, writer, saved, private, sessions, payload); err != nil {
 				continue
 			}
+		}
+	}
+}
+
+// readRelay pumps the socket into messages; a read error or a binary frame
+// ends the connection through readErr.
+func readRelay(conn *websocket.Conn, messages chan<- []byte, readErr chan<- error, done <-chan struct{}) {
+	for {
+		kind, payload, err := conn.ReadMessage()
+		if err != nil {
+			select {
+			case readErr <- err:
+			case <-done:
+			}
+			return
+		}
+		if kind != websocket.TextMessage {
+			select {
+			case readErr <- errors.New("remote cloud: relay sent a binary message"):
+			case <-done:
+			}
+			return
+		}
+		select {
+		case messages <- payload:
+		case <-done:
+			return
 		}
 	}
 }
@@ -527,7 +535,7 @@ func classifyRelayDialError(response *http.Response, err error) error {
 
 func (h *Host) handle(
 	ctx context.Context,
-	conn *websocket.Conn,
+	writer *relayWriter,
 	saved *identity,
 	private *ecdh.PrivateKey,
 	sessions map[string]*controllerSession,
@@ -541,6 +549,9 @@ func (h *Host) handle(
 	case "controller_disconnected":
 		if h.presence != nil {
 			h.presence.CloudControllerDisconnected(message.ConnectionID)
+		}
+		if session := sessions[message.ConnectionID]; session != nil {
+			session.stop()
 		}
 		delete(sessions, message.ConnectionID)
 		return nil
@@ -564,16 +575,28 @@ func (h *Host) handle(
 		if err != nil {
 			return err
 		}
-		sessions[message.ConnectionID] = &controllerSession{cipher: created, ordinal: ordinal, nonce: nonce}
-		ready, err := created.seal(map[string]any{
+		push := helloMux(message.Payload)
+		session = &controllerSession{
+			cipher: created, ordinal: ordinal, nonce: nonce,
+			connectionID: message.ConnectionID, deviceID: "cloud:" + message.ConnectionID,
+			commands: make(chan sessionCommand, 256), done: make(chan struct{}),
+			push: &muxPush{enabled: push, subs: make(map[string]*muxSub)},
+		}
+		sessions[message.ConnectionID] = session
+		go h.runSession(ctx, session)
+		ready := map[string]any{
 			"v": protocolVersion, "type": "ready", "deviceId": saved.DeviceID,
 			"name": h.name, "platform": platformName(runtime.GOOS), "version": h.version,
 			"features": []string{"replay", "upload"}, "session": nonce, "instance": h.instance(),
-		})
+		}
+		if h.events != nil && push {
+			ready["capabilities"] = map[string]int{"mux": 1}
+		}
+		reply, err := created.seal(ready)
 		if err != nil {
 			return err
 		}
-		return writeDirected(conn, message.ConnectionID, ready)
+		return writeDirected(writer, message.ConnectionID, reply)
 	}
 	var command controllerCommand
 	if h.presence != nil {
@@ -585,33 +608,29 @@ func (h *Host) handle(
 	if command.Version != protocolVersion || command.ID == "" {
 		return errors.New("remote cloud: unsupported controller command")
 	}
-	session.uploads.expire(time.Now())
 	if err := session.admit(command); err != nil {
 		return err
 	}
-	var response map[string]any
-	switch command.Type {
-	case "ping":
-		response = map[string]any{"v": protocolVersion, "type": "pong", "id": command.ID, "at": time.Now().UTC().Format(time.RFC3339Nano)}
-	case "tasks.list", "tasks.get", "tasks.send":
-		response = h.taskCommand(ctx, "cloud:"+message.ConnectionID, session.ordinal, message.Scopes, command)
-	case "desktop.request":
-		return h.desktopCommand(ctx, conn, session.cipher, "cloud:"+message.ConnectionID, session.ordinal, message.ConnectionID, message.Scopes, command)
-	case "desktop.request.part":
-		return h.uploadPart(ctx, conn, session, "cloud:"+message.ConnectionID, message.ConnectionID, message.Scopes, command)
+	if command.Type == "mux.credit" {
+		// Grant before the queue: a credit that waits behind a slow desktop
+		// request would let the credit timeout starve this session's streams.
+		h.muxCredit(session, writer, message.Scopes, command)
+		return nil
+	}
+	// A full queue means commands arrive faster than they run; dropping is
+	// recoverable through the controller's request timeout, blocking the read
+	// loop would stall every other controller on this device.
+	select {
+	case session.commands <- sessionCommand{writer: writer, scopes: message.Scopes, command: command}:
+	case <-session.done:
 	default:
-		return errors.New("remote cloud: unsupported controller command")
 	}
-	reply, err := session.cipher.seal(response)
-	if err != nil {
-		return err
-	}
-	return writeDirected(conn, message.ConnectionID, reply)
+	return nil
 }
 
 func (h *Host) desktopCommand(
 	ctx context.Context,
-	conn *websocket.Conn,
+	writer *relayWriter,
 	session *sessionCipher,
 	deviceID string,
 	ordinal int,
@@ -620,13 +639,13 @@ func (h *Host) desktopCommand(
 	command controllerCommand,
 ) error {
 	if h.desktop == nil || !hasScope(scopes, account.RemoteDesktop) {
-		return h.writeDesktopError(conn, session, connectionID, command.ID, "desktop access is unavailable")
+		return h.writeDesktopError(writer, session, connectionID, command.ID, "desktop access is unavailable")
 	}
 	body, err := base64.RawURLEncoding.DecodeString(command.Body)
 	if err != nil {
-		return h.writeDesktopError(conn, session, connectionID, command.ID, "desktop request body is invalid")
+		return h.writeDesktopError(writer, session, connectionID, command.ID, "desktop request body is invalid")
 	}
-	return h.runDesktop(ctx, conn, session, deviceID, ordinal, connectionID, command.ID, DesktopRequest{Method: command.Method, Path: command.Path, Body: body})
+	return h.runDesktop(ctx, writer, session, deviceID, ordinal, connectionID, command.ID, DesktopRequest{Method: command.Method, Path: command.Path, Body: body})
 }
 
 // uploadPart takes one part of a request too large for one message and runs the
@@ -634,7 +653,7 @@ func (h *Host) desktopCommand(
 // that lost it mid-upload stops there.
 func (h *Host) uploadPart(
 	ctx context.Context,
-	conn *websocket.Conn,
+	writer *relayWriter,
 	session *controllerSession,
 	deviceID string,
 	connectionID string,
@@ -643,16 +662,16 @@ func (h *Host) uploadPart(
 ) error {
 	if h.desktop == nil || !hasScope(scopes, account.RemoteDesktop) {
 		session.uploads.drop(command.ID)
-		return h.writeDesktopError(conn, session.cipher, connectionID, command.ID, "desktop access is unavailable")
+		return h.writeDesktopError(writer, session.cipher, connectionID, command.ID, "desktop access is unavailable")
 	}
 	request, done, err := session.uploads.add(command, time.Now())
 	if err != nil {
-		return h.writeDesktopError(conn, session.cipher, connectionID, command.ID, err.Error())
+		return h.writeDesktopError(writer, session.cipher, connectionID, command.ID, err.Error())
 	}
 	if !done {
 		return nil
 	}
-	return h.runDesktop(ctx, conn, session.cipher, deviceID, session.ordinal, connectionID, command.ID, request)
+	return h.runDesktop(ctx, writer, session.cipher, deviceID, session.ordinal, connectionID, command.ID, request)
 }
 
 // runDesktop is the one door a desktop request, whole or reassembled, goes
@@ -660,7 +679,7 @@ func (h *Host) uploadPart(
 // same request returns it instead of running the request again.
 func (h *Host) runDesktop(
 	ctx context.Context,
-	conn *websocket.Conn,
+	writer *relayWriter,
 	session *sessionCipher,
 	deviceID string,
 	ordinal int,
@@ -672,7 +691,7 @@ func (h *Host) runDesktop(
 	key := replayKey(id, request.Method, request.Path, request.Body)
 	if replay {
 		if payloads, ok := h.link.replay.get(key, time.Now()); ok {
-			return writeSealed(conn, session, connectionID, payloads)
+			return writeSealed(writer, session, connectionID, payloads)
 		}
 	}
 	request.Ordinal = ordinal
@@ -682,13 +701,13 @@ func (h *Host) runDesktop(
 		if replay {
 			h.link.replay.put(key, payloads, len(err.Error()), time.Now())
 		}
-		return writeSealed(conn, session, connectionID, payloads)
+		return writeSealed(writer, session, connectionID, payloads)
 	}
 	payloads := desktopPayloads(id, response)
 	if replay {
 		h.link.replay.put(key, payloads, len(response.Body), time.Now())
 	}
-	return writeSealed(conn, session, connectionID, payloads)
+	return writeSealed(writer, session, connectionID, payloads)
 }
 
 func desktopPayloads(id string, response DesktopResponse) []map[string]any {
@@ -710,27 +729,27 @@ func desktopPayloads(id string, response DesktopResponse) []map[string]any {
 	return payloads
 }
 
-func writeSealed(conn *websocket.Conn, session *sessionCipher, connectionID string, payloads []map[string]any) error {
+func writeSealed(writer *relayWriter, session *sessionCipher, connectionID string, payloads []map[string]any) error {
 	for _, payload := range payloads {
 		reply, err := session.seal(payload)
 		if err != nil {
 			return err
 		}
-		if err := writeDirected(conn, connectionID, reply); err != nil {
+		if err := writeDirected(writer, connectionID, reply); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (h *Host) writeDesktopError(conn *websocket.Conn, session *sessionCipher, connectionID, id, message string) error {
+func (h *Host) writeDesktopError(writer *relayWriter, session *sessionCipher, connectionID, id, message string) error {
 	reply, err := session.seal(map[string]any{
 		"v": protocolVersion, "type": "error", "id": id, "error": message,
 	})
 	if err != nil {
 		return err
 	}
-	return writeDirected(conn, connectionID, reply)
+	return writeDirected(writer, connectionID, reply)
 }
 
 func (h *Host) taskCommand(ctx context.Context, deviceID string, ordinal int, scopes []account.RemoteCapability, command controllerCommand) map[string]any {
@@ -764,17 +783,6 @@ func (h *Host) taskCommand(ctx context.Context, deviceID string, ordinal int, sc
 
 func hasScope(scopes []account.RemoteCapability, want account.RemoteCapability) bool {
 	return slices.Contains(scopes, want)
-}
-
-func writeDirected(conn *websocket.Conn, connectionID, payload string) error {
-	wire, err := json.Marshal(map[string]string{"to": connectionID, "payload": payload})
-	if err != nil {
-		return err
-	}
-	if len(wire) > 64<<10 {
-		return fmt.Errorf("remote cloud: reply exceeds relay limit")
-	}
-	return conn.WriteMessage(websocket.TextMessage, wire)
 }
 
 func wait(ctx context.Context, delay time.Duration) bool {

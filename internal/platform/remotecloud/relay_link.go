@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 )
 
@@ -30,8 +31,9 @@ const (
 	maxHeartbeat = time.Minute
 )
 
-// relayLink is the state that spans relay connections. Only the Run goroutine
-// touches it.
+// relayLink is the state that spans relay connections. The sessions map
+// belongs to the Run goroutine; the replay cache carries its own lock because
+// session command goroutines read and write it.
 type relayLink struct {
 	deviceID     string
 	instanceID   string
@@ -98,7 +100,7 @@ func (m relayHelloMessage) interval() time.Duration {
 func (h *Host) adopt(deviceID string) map[string]*controllerSession {
 	if h.link.deviceID != deviceID {
 		h.dropControllers()
-		h.link.replay = replayCache{}
+		h.link.replay.reset()
 		h.link.deviceID = deviceID
 	}
 	if h.link.sessions == nil {
@@ -130,6 +132,9 @@ func (h *Host) keepControllers(attached []string) {
 }
 
 func (h *Host) forgetController(id string) {
+	if session := h.link.sessions[id]; session != nil {
+		session.stop()
+	}
 	delete(h.link.sessions, id)
 	if h.presence != nil {
 		h.presence.CloudControllerDisconnected(id)
@@ -148,6 +153,7 @@ func (h *Host) dropControllers() {
 // answer instead of running it twice. It outlives controller sessions and is
 // reset only when the device identity or account changes.
 type replayCache struct {
+	mu      sync.Mutex
 	entries map[string]replayEntry
 	bytes   int
 }
@@ -173,6 +179,8 @@ func replayable(method string) bool {
 }
 
 func (c *replayCache) get(id string, now time.Time) ([]map[string]any, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	entry, ok := c.entries[id]
 	if !ok || now.Sub(entry.at) >= replayTTL {
 		return nil, false
@@ -181,6 +189,8 @@ func (c *replayCache) get(id string, now time.Time) ([]map[string]any, bool) {
 }
 
 func (c *replayCache) put(id string, payloads []map[string]any, size int, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if size > replayEntryBytes {
 		return
 	}
@@ -189,10 +199,10 @@ func (c *replayCache) put(id string, payloads []map[string]any, size int, now ti
 	}
 	for key, entry := range c.entries {
 		if now.Sub(entry.at) >= replayTTL {
-			c.remove(key)
+			c.removeLocked(key)
 		}
 	}
-	c.remove(id)
+	c.removeLocked(id)
 	for len(c.entries) >= replayEntries || c.bytes+size > replayTotalBytes {
 		oldest := ""
 		for key, entry := range c.entries {
@@ -200,13 +210,20 @@ func (c *replayCache) put(id string, payloads []map[string]any, size int, now ti
 				oldest = key
 			}
 		}
-		c.remove(oldest)
+		c.removeLocked(oldest)
 	}
 	c.entries[id] = replayEntry{at: now, size: size, payloads: payloads}
 	c.bytes += size
 }
 
-func (c *replayCache) remove(id string) {
+func (c *replayCache) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = nil
+	c.bytes = 0
+}
+
+func (c *replayCache) removeLocked(id string) {
 	if entry, ok := c.entries[id]; ok {
 		c.bytes -= entry.size
 		delete(c.entries, id)

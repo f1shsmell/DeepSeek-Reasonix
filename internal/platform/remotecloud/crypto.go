@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"golang.org/x/crypto/hkdf"
 )
@@ -18,10 +19,11 @@ import (
 const protocolVersion = 1
 
 type hello struct {
-	Version   int    `json:"v"`
-	Type      string `json:"type"`
-	PublicKey string `json:"publicKey"`
-	Salt      string `json:"salt"`
+	Version      int            `json:"v"`
+	Type         string         `json:"type"`
+	PublicKey    string         `json:"publicKey"`
+	Salt         string         `json:"salt"`
+	Capabilities map[string]int `json:"capabilities,omitempty"`
 }
 
 type sealedMessage struct {
@@ -34,6 +36,9 @@ type sessionCipher struct {
 	aead cipher.AEAD
 	aad  []byte
 	seen map[string]struct{}
+	// sealMu guards seal: command goroutines and push pumps seal concurrently,
+	// while open stays on the single read loop.
+	sealMu sync.Mutex
 }
 
 func newSessionCipher(private *ecdh.PrivateKey, deviceID, payload string) (*sessionCipher, error) {
@@ -77,6 +82,8 @@ func newSessionCipher(private *ecdh.PrivateKey, deviceID, payload string) (*sess
 }
 
 func (s *sessionCipher) seal(value any) (string, error) {
+	s.sealMu.Lock()
+	defer s.sealMu.Unlock()
 	plain, err := json.Marshal(value)
 	if err != nil {
 		return "", err
