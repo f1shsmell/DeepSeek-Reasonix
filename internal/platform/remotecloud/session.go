@@ -2,6 +2,8 @@ package remotecloud
 
 import (
 	"context"
+	"crypto/ecdh"
+	"runtime"
 	"time"
 
 	"reasonix/internal/platform/account"
@@ -19,6 +21,7 @@ type controllerSession struct {
 
 	lastSeq int64
 	uploads uploads
+	bulk    bool
 
 	commands chan sessionCommand
 	done     chan struct{}
@@ -29,6 +32,8 @@ type sessionCommand struct {
 	writer  *relayWriter
 	scopes  []account.RemoteCapability
 	command controllerCommand
+	// bulk carries one binary part; command is then the zero value.
+	bulk []byte
 }
 
 // stop ends the session: its command goroutine exits and every push
@@ -55,6 +60,59 @@ func (s *controllerSession) cancelPush() {
 	s.push.subsMu.Unlock()
 }
 
+// admitController performs the sealed handshake for a new controller and
+// answers with the ready greeting, advertising only the lanes both sides
+// declared.
+func (h *Host) admitController(ctx context.Context, writer *relayWriter, saved *identity, private *ecdh.PrivateKey, message gatewayMessage) (*controllerSession, error) {
+	created, err := newSessionCipher(private, saved.DeviceID, message.Payload)
+	if err != nil {
+		return nil, err
+	}
+	ordinal := 0
+	if h.presence != nil {
+		ordinal = h.presence.CloudControllerConnected(message.ConnectionID, "Web Studio")
+	}
+	nonce, err := randomToken()
+	if err != nil {
+		return nil, err
+	}
+	push := helloMux(message.Payload)
+	bulk := helloBulk(message.Payload)
+	session := &controllerSession{
+		cipher: created, ordinal: ordinal, nonce: nonce,
+		connectionID: message.ConnectionID, deviceID: "cloud:" + message.ConnectionID,
+		commands: make(chan sessionCommand, 256), done: make(chan struct{}),
+		push: &muxPush{enabled: push, subs: make(map[string]*muxSub)},
+		bulk: bulk,
+	}
+	go h.runSession(ctx, session)
+	ready := map[string]any{
+		"v": protocolVersion, "type": "ready", "deviceId": saved.DeviceID,
+		"name": h.name, "platform": platformName(runtime.GOOS), "version": h.version,
+		"features": []string{"replay", "upload"}, "session": nonce, "instance": h.instance(),
+	}
+	capabilities := map[string]int{}
+	if h.events != nil && push {
+		capabilities["mux"] = 1
+	}
+	if bulk {
+		capabilities["bulk"] = 1
+	}
+	if len(capabilities) > 0 {
+		ready["capabilities"] = capabilities
+	}
+	reply, err := created.seal(ready)
+	if err != nil {
+		session.stop()
+		return nil, err
+	}
+	if err := writeDirected(writer, message.ConnectionID, reply); err != nil {
+		session.stop()
+		return nil, err
+	}
+	return session, nil
+}
+
 func (h *Host) runSession(ctx context.Context, s *controllerSession) {
 	for {
 		select {
@@ -73,6 +131,10 @@ func (h *Host) runCommand(ctx context.Context, s *controllerSession, cmd session
 	default:
 	}
 	s.uploads.expire(time.Now())
+	if cmd.bulk != nil {
+		h.bulkPart(ctx, s, cmd)
+		return
+	}
 	var response map[string]any
 	switch cmd.command.Type {
 	case "ping":
@@ -84,6 +146,9 @@ func (h *Host) runCommand(ctx context.Context, s *controllerSession, cmd session
 		return
 	case "desktop.request.part":
 		_ = h.uploadPart(ctx, cmd.writer, s, s.deviceID, s.connectionID, cmd.scopes, cmd.command)
+		return
+	case "bulk.open":
+		h.bulkOpen(s, cmd)
 		return
 	case "mux.open", "mux.close":
 		h.muxCommand(s, cmd)

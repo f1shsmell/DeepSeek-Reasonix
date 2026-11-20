@@ -392,8 +392,11 @@ type controllerCommand struct {
 	Path    string `json:"path,omitempty"`
 	Body    string `json:"body,omitempty"`
 	// Index and Total number the parts of an upload; see upload.go.
-	Index   int    `json:"index,omitempty"`
-	Total   int    `json:"total,omitempty"`
+	Index int `json:"index,omitempty"`
+	Total int `json:"total,omitempty"`
+	// Name and Mime describe a bulk attachment; see bulk.go.
+	Name    string `json:"name,omitempty"`
+	Mime    string `json:"mime,omitempty"`
 	Session string `json:"session,omitempty"`
 	Seq     int64  `json:"seq,omitempty"`
 	// Runtime, After, Attach and Credit drive the mux push lane; see mux.go.
@@ -563,46 +566,25 @@ func (h *Host) handle(
 	}
 	session := sessions[message.ConnectionID]
 	if session == nil {
-		created, err := newSessionCipher(private, saved.DeviceID, message.Payload)
+		created, err := h.admitController(ctx, writer, saved, private, message)
 		if err != nil {
 			return err
 		}
-		ordinal := 0
-		if h.presence != nil {
-			ordinal = h.presence.CloudControllerConnected(message.ConnectionID, "Web Studio")
-		}
-		nonce, err := randomToken()
-		if err != nil {
-			return err
-		}
-		push := helloMux(message.Payload)
-		session = &controllerSession{
-			cipher: created, ordinal: ordinal, nonce: nonce,
-			connectionID: message.ConnectionID, deviceID: "cloud:" + message.ConnectionID,
-			commands: make(chan sessionCommand, 256), done: make(chan struct{}),
-			push: &muxPush{enabled: push, subs: make(map[string]*muxSub)},
-		}
-		sessions[message.ConnectionID] = session
-		go h.runSession(ctx, session)
-		ready := map[string]any{
-			"v": protocolVersion, "type": "ready", "deviceId": saved.DeviceID,
-			"name": h.name, "platform": platformName(runtime.GOOS), "version": h.version,
-			"features": []string{"replay", "upload"}, "session": nonce, "instance": h.instance(),
-		}
-		if h.events != nil && push {
-			ready["capabilities"] = map[string]int{"mux": 1}
-		}
-		reply, err := created.seal(ready)
-		if err != nil {
-			return err
-		}
-		return writeDirected(writer, message.ConnectionID, reply)
+		sessions[message.ConnectionID] = created
+		return nil
 	}
-	var command controllerCommand
 	if h.presence != nil {
 		h.presence.CloudControllerSeen(message.ConnectionID)
 	}
-	if err := session.cipher.open(message.Payload, &command); err != nil {
+	plain, bin, err := session.cipher.openPlain(message.Payload)
+	if err != nil {
+		return err
+	}
+	if bin {
+		return h.queueBulk(session, writer, message.Scopes, plain)
+	}
+	var command controllerCommand
+	if err := json.Unmarshal(plain, &command); err != nil {
 		return err
 	}
 	if command.Version != protocolVersion || command.ID == "" {

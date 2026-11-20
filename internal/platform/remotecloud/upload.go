@@ -2,8 +2,10 @@ package remotecloud
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -26,6 +28,7 @@ var (
 	errUploadTooBig  = errors.New("upload is larger than the limit")
 	errUploadInvalid = errors.New("upload part is invalid")
 	errUploadExpired = errors.New("upload timed out waiting for its next part")
+	errUploadBusy    = errors.New("another upload is already in flight")
 )
 
 // upload is one request being received. A session holds at most one: the page
@@ -33,6 +36,7 @@ var (
 // else abandons it.
 type upload struct {
 	id, method, path string
+	name, mime       string
 	total, next      int
 	body             []byte
 	touched          time.Time
@@ -72,7 +76,71 @@ func (u *uploads) add(command controllerCommand, now time.Time) (request Desktop
 	case command.Index != cur.next || command.Total != cur.total:
 		u.current = nil
 		return DesktopRequest{}, false, errUploadOrder
-	case len(cur.body)+len(part) > maxUploadBody:
+	}
+	return u.append(part, now)
+}
+
+// begin opens a bulk upload, or resumes one this controller already started:
+// the answer is the number of parts held, so a retry after a dropped link
+// sends only what is missing. A different or expired upload starts over.
+func (u *uploads) begin(command controllerCommand, now time.Time) (int, error) {
+	if command.Total < 1 || command.Total > (maxUploadBody+uploadPartMax-1)/uploadPartMax ||
+		strings.TrimSpace(command.Path) == "" || strings.TrimSpace(command.Name) == "" {
+		u.drop(command.ID)
+		return 0, errUploadInvalid
+	}
+	cur := u.current
+	if cur != nil && cur.id == command.ID && cur.total == command.Total &&
+		cur.path == command.Path && cur.name == command.Name && now.Sub(cur.touched) < uploadIdle {
+		cur.touched = now
+		return cur.next, nil
+	}
+	// One upload per session. Replacing a live one used to strand it: its next
+	// part failed the innocent replacement with an order error named for the
+	// wrong id. A second open waits for the first to finish or expire.
+	if cur != nil && cur.id != command.ID && now.Sub(cur.touched) < uploadIdle {
+		return 0, errUploadBusy
+	}
+	u.current = &upload{
+		id: command.ID, method: http.MethodPost, path: command.Path,
+		name: command.Name, mime: command.Mime, total: command.Total, touched: now,
+	}
+	return 0, nil
+}
+
+// addBinary takes one bulk part: a 4-byte big-endian index followed by the
+// raw bytes. The index catches a part the queue dropped — without it a gap
+// would silently corrupt the file — and a resume continues from the count
+// begin reported. The same idle and size limits hold.
+func (u *uploads) addBinary(part []byte, now time.Time) (DesktopRequest, bool, error) {
+	cur := u.current
+	switch {
+	case cur == nil:
+		return DesktopRequest{}, false, errUploadOrder
+	case now.Sub(cur.touched) >= uploadIdle:
+		u.current = nil
+		return DesktopRequest{}, false, errUploadExpired
+	case len(part) < 5:
+		u.current = nil
+		return DesktopRequest{}, false, errUploadInvalid
+	}
+	if int(binary.BigEndian.Uint32(part[:4])) != cur.next {
+		u.current = nil
+		return DesktopRequest{}, false, errUploadOrder
+	}
+	data := part[4:]
+	if len(data) == 0 || len(data) > uploadPartMax {
+		u.current = nil
+		return DesktopRequest{}, false, errUploadInvalid
+	}
+	return u.append(data, now)
+}
+
+// append holds one validated part and hands the whole request back once the
+// last one arrives.
+func (u *uploads) append(part []byte, now time.Time) (DesktopRequest, bool, error) {
+	cur := u.current
+	if len(cur.body)+len(part) > maxUploadBody {
 		u.current = nil
 		return DesktopRequest{}, false, fmt.Errorf("%w (%d MiB)", errUploadTooBig, maxUploadBody>>20)
 	}
