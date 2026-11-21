@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { t } from "../i18n";
 import type { HubPort } from "../port/hub";
-import type { CloudShareOffer, ShareOffer, ShareStatus } from "../port/share";
+import type { CloudShareOffer, ShareAddress, ShareOffer, ShareStatus } from "../port/share";
 import { copyText } from "./CopyButton";
 import { Switch } from "./Switch";
 
@@ -10,7 +10,7 @@ interface Props {
   onError: (e: unknown) => void;
 }
 
-// While the door is open the list is what changes under the reader: a phone
+// While a door is open the list is what changes under the reader: a phone
 // pairs, the code on screen is spent. Nothing pushes that, so it is read.
 const POLL_MS = 3000;
 
@@ -23,15 +23,33 @@ export function clock(iso: string): string {
 // but read as a name it is a hundred characters and every one starts the same.
 export const deviceLabel = (i: number) => t("remote.device_n", { n: i + 1 });
 
+// One line a reader tells addresses apart by: the adapter a phone would dial.
+export const addressLabel = (a: ShareAddress) =>
+  a.kind === "tailnet"
+    ? `${a.ip} · Tailscale`
+    : a.kind === "virtual"
+      ? `${a.ip} · ${a.interface} · ${t("remote.virtual_adapter")}`
+      : `${a.ip} · ${a.interface}`;
+
 export type Share = ReturnType<typeof useShare>;
+
+// Prunes the pictures of codes the kernel no longer holds: each door keeps
+// its own, so one door's spend does not drop another's. Pure, so the pruning
+// is tested without a render.
+export function keepLiveOffers(prev: Record<string, ShareOffer>, st: ShareStatus): Record<string, ShareOffer> {
+  const kept: Record<string, ShareOffer> = {};
+  for (const [ip, offer] of Object.entries(prev)) {
+    if (st.doors.some((d) => d.address === ip && d.offerExpires)) kept[ip] = offer;
+  }
+  return kept;
+}
 
 /** The window's door for phones, as one state both the settings block and the
  *  chrome's card draw from. `watch` is whether this surface is on screen: only
  *  then is the device list worth reading on a timer. */
 export function useShare(hub: HubPort, onError: (e: unknown) => void, watch = true) {
   const [st, setSt] = useState<ShareStatus | null>(null);
-  const [ip, setIp] = useState("");
-  const [offer, setOffer] = useState<ShareOffer | null>(null);
+  const [offers, setOffers] = useState<Record<string, ShareOffer>>({});
   const [cloudOffer, setCloudOffer] = useState<CloudShareOffer | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState("");
@@ -57,11 +75,13 @@ export function useShare(hub: HubPort, onError: (e: unknown) => void, watch = tr
     return () => clearInterval(timer);
   }, [watch, read]);
 
-  // The kernel withdraws a code once it pairs or lapses; the picture of it has
-  // to go too, or the next phone scans a code that can no longer work.
+  // The kernel withdraws a code once it pairs or lapses; the picture of it
+  // has to go too, or the next phone scans a code that can no longer work.
+  // Every door keeps its own, so one door's spend does not drop another's.
   useEffect(() => {
-    if (offer && st && !st.offerExpires) setOffer(null);
-  }, [st, offer]);
+    if (!st) return;
+    setOffers((prev) => keepLiveOffers(prev, st));
+  }, [st]);
 
   useEffect(() => {
     if (cloudOffer && st && !st.cloudRemote?.online) setCloudOffer(null);
@@ -93,80 +113,103 @@ export function useShare(hub: HubPort, onError: (e: unknown) => void, watch = tr
   // The code and the status that knows it is on offer land together; set one
   // at a time, the effect above reads a fresh code against a status that has
   // not heard of it yet and drops it.
-  const mint = useCallback(async () => {
-    const next = await hub.offerShare();
-    const now = await hub.shareStatus();
-    setSt(now);
-    setOffer(next);
-  }, [hub]);
+  const mint = useCallback(
+    async (ip: string) => {
+      const next = await hub.offerShare(ip);
+      const now = await hub.shareStatus();
+      setSt(now);
+      setOffers((prev) => ({ ...prev, [ip]: next }));
+    },
+    [hub],
+  );
 
-  const newCode = useCallback(() => run(mint), [run, mint]);
+  // Opening a door asks for its code at once: the row is what the reader
+  // wanted to see. Closing one drops that door's picture with the door; the
+  // other doors and the paired phones are not touched.
+  const toggleAddress = useCallback(
+    (ip: string, on: boolean) =>
+      run(async () => {
+        if (on) {
+          await hub.openShare(ip);
+          await mint(ip);
+          return;
+        }
+        setOffers((prev) => {
+          const { [ip]: _gone, ...rest } = prev;
+          return rest;
+        });
+        setSt(await hub.closeShare(ip));
+      }),
+    [hub, mint, run],
+  );
+
+  // The master switch: on opens the first address this machine offers; off
+  // closes every door and unpairs every phone.
+  const toggle = useCallback(
+    () =>
+      run(async () => {
+        if (st?.open) {
+          setOffers({});
+          setSt(await hub.closeShare());
+          return;
+        }
+        const at = st?.addresses[0]?.ip ?? "";
+        if (!at) return;
+        await hub.openShare(at);
+        await mint(at);
+      }),
+    [hub, mint, run, st],
+  );
+
+  // A fixed port is read by the doors opened next; a standing door is not
+  // moved, so a phone that paired on it keeps its cookie.
+  const savePort = useCallback(
+    (port: number) => run(async () => setSt(await hub.setSharePort(port))),
+    [hub, run],
+  );
+  // The proxy's name lands with the doors opened next; no standing door moves.
+  const saveOrigin = useCallback(
+    (origin: string) => run(async () => setSt(await hub.setSharePublicOrigin(origin))),
+    [hub, run],
+  );
+
+  const newCode = useCallback((ip: string) => run(() => mint(ip)), [run, mint]);
   const newCloudCode = useCallback(
     () => run(async () => setCloudOffer(await hub.offerCloudShare())),
     [hub, run],
   );
 
-  const toggle = () => run(async () => {
-    if (st?.open) {
-      setOffer(null);
-      setSt(await hub.closeShare());
-      return;
-    }
-    const at = ip || st?.addresses[0]?.ip || "";
-    await hub.openShare(at);
-    await mint();
-  });
-
   const revoke = (id: string) => run(async () => setSt(await hub.revokeDevice(id)));
 
-  // Choosing another network while the door is open moves it there: the old
-  // address stops answering, so the code and every pairing go with it.
-  const pick = (next: string) => {
-    setIp(next);
-    if (!st?.open) return;
-    void run(async () => {
-      setOffer(null);
-      await hub.openShare(next);
-      await mint();
-    });
-  };
-
-  // A fixed port is read at the next open, so an open door is moved to it the
-  // way a network change moves it: the old origin stops answering.
-  const savePort = (port: number) =>
-    run(async () => {
-      const next = await hub.setSharePort(port);
-      setSt(next);
-      if (!next.open) return;
-      const at = ip || next.origin?.replace(/^https?:\/\//, "").replace(/:\d+$/, "") || next.addresses[0]?.ip || "";
-      setOffer(null);
-      await hub.openShare(at);
-      await mint();
-    });
-
-  return { st, ip, pick, savePort, offer, cloudOffer, busy, confirm, setConfirm, newCode, newCloudCode, toggle, revoke, remember, saveRemember, refresh: read };
+  return { st, offers, savePort, saveOrigin, cloudOffer, busy, confirm, setConfirm, newCode, newCloudCode, toggle, toggleAddress, revoke, remember, saveRemember, refresh: read };
 }
 
-/** The switch, the network, the code and the paired phones. */
+/** The switch, the doors, each door's code, and the paired phones. */
 export function ShareBody({ share }: { share: Share }) {
-  const { st, ip, pick, savePort, offer, busy, confirm, setConfirm, newCode, toggle, revoke, remember, saveRemember } = share;
+  const { st, offers, savePort, saveOrigin, busy, confirm, setConfirm, newCode, toggle, toggleAddress, revoke, remember, saveRemember } = share;
   const [copied, setCopied] = useState<"" | "done" | "failed">("");
   const [portDraft, setPortDraft] = useState<string | null>(null);
+  const [originDraft, setOriginDraft] = useState<string | null>(null);
   if (!st) return null;
-  // The link the code draws, for a device that cannot scan: the same one-time
-  // credential, so it is copied on request and never shown as text.
+  // The link the code draws, for a device that cannot scan: the same
+  // one-time credential, so it is copied on request and never shown as text.
   const copyLink = (url: string) =>
     copyText(url)
       .then(() => setCopied("done"))
       .catch(() => setCopied("failed"))
       .finally(() => window.setTimeout(() => setCopied(""), 1600));
-  const chosen = ip || (st.open ? st.origin?.replace(/^https?:\/\//, "").replace(/:\d+$/, "") : "") || st.addresses[0]?.ip || "";
   const noNetwork = st.addresses.length === 0;
   const commitPort = () => {
     if (portDraft === null) return;
     const next = portDraft === "" ? 0 : Number(portDraft);
     setPortDraft(null);
     if (next !== (st.port ?? 0)) void savePort(next);
+  };
+  const commitOrigin = () => {
+    if (originDraft === null) return;
+    const next = originDraft.trim();
+    setOriginDraft(null);
+    if (next !== (st.publicOrigin ?? "")) void saveOrigin(next);
   };
 
   return (
@@ -193,25 +236,77 @@ export function ShareBody({ share }: { share: Share }) {
         <Switch data-action="share.remember" on={remember ?? false} busy={busy || remember === null} label={t("remote.remember_paired_phones")} onClick={() => void saveRemember(!(remember ?? false))} />
       </div>
 
-      {st.addresses.length > 1 && (
-        <label className="rmtf">
-          <span>{t("common.network")}</span>
-          <select
-            data-action="share.address"
-            value={chosen}
-            disabled={busy}
-            onChange={(e) => pick(e.target.value)}
-          >
-            {st.addresses.map((a) => (
-              <option key={a.ip} value={a.ip}>
-                {a.kind === "tailnet" ? `${a.ip} · Tailscale` : a.kind === "virtual" ? `${a.ip} · ${a.interface} · ${t("remote.virtual_adapter")}` : `${a.ip} · ${a.interface}`}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      {st.addresses.length > 1 && st.open && st.devices.length > 0 && (
-        <p className="rmthint">{t("remote.switching_networks_disconnects_the_connected")}</p>
+      {!noNetwork && (
+        <div className="sharedoors">
+          <p className="rmthint">{t("remote.every_network_has_its_own")}</p>
+          {st.addresses.map((a) => {
+            const door = st.doors.find((d) => d.address === a.ip);
+            const offer = door ? offers[a.ip] : undefined;
+            return (
+              <div className="sharedoor" key={a.ip} data-on={door ? "" : undefined}>
+                <div className="sharedoorhd">
+                  <span className="lb" title={a.ip}>{addressLabel(a)}</span>
+                  <Switch
+                    data-action="share.door"
+                    data-target={a.ip}
+                    on={!!door}
+                    busy={busy}
+                    label={t("remote.allow_this_address")}
+                    onClick={() => toggleAddress(a.ip, !door)}
+                  />
+                </div>
+                {door &&
+                  (offer ? (
+                    <div className="shareqr">
+                      <img src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(offer.qr)}`} alt={t("remote.pairing_qr_code")} width={184} height={184} />
+                      <div className="sharehow">
+                        <span className="lb">{t("remote.scan_with_your_phones_camera")}</span>
+                        <span className="ds">{t("remote.the_code_pairs_one_phone", { time: clock(offer.expires) })}</span>
+                        <code dir="ltr">{door.origin}</code>
+                        <button className="rmtlnk sharecopy" data-action="share.copy" data-target={a.ip} onClick={() => void copyLink(offer.url)}>
+                          {copied === "done" ? t("common.copied") : copied === "failed" ? t("remote.copy_blocked") : t("remote.copy_pairing_link")}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button className="rmtadd" data-action="share.offer" data-target={a.ip} disabled={busy} onClick={() => void newCode(a.ip)}>
+                      {t("remote.show_a_pairing_code")}
+                    </button>
+                  ))}
+              </div>
+            );
+          })}
+          {st.open && <p className="rmthint">{t("remote.turning_a_network_off_stops_only")}</p>}
+          {st.publicOrigin && (() => {
+            const door = st.doors.find((d) => d.kind === "loopback");
+            const offer = door ? offers[door.address] : undefined;
+            return (
+              <div className="sharedoor" data-on={door ? "" : undefined}>
+                <div className="sharedoorhd">
+                  <span className="lb" title={st.publicOrigin}>{st.publicOrigin} · {t("remote.via_proxy")}</span>
+                </div>
+                {door &&
+                  (offer ? (
+                    <div className="shareqr">
+                      <img src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(offer.qr)}`} alt={t("remote.pairing_qr_code")} width={184} height={184} />
+                      <div className="sharehow">
+                        <span className="lb">{t("remote.scan_with_your_phones_camera")}</span>
+                        <span className="ds">{t("remote.the_code_pairs_one_phone", { time: clock(offer.expires) })}</span>
+                        <code dir="ltr">{st.publicOrigin}</code>
+                        <button className="rmtlnk sharecopy" data-action="share.copy" data-target={door.address} onClick={() => void copyLink(offer.url)}>
+                          {copied === "done" ? t("common.copied") : copied === "failed" ? t("remote.copy_blocked") : t("remote.copy_pairing_link")}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button className="rmtadd" data-action="share.offer" data-target={door.address} disabled={busy} onClick={() => void newCode(door.address)}>
+                      {t("remote.show_a_pairing_code")}
+                    </button>
+                  ))}
+              </div>
+            );
+          })()}
+        </div>
       )}
 
       <label className="rmtf">
@@ -230,65 +325,61 @@ export function ShareBody({ share }: { share: Share }) {
       <p className="rmthint">
         {t("remote.leave_empty_to_let_the")}
       </p>
-      {st.open && st.devices.length > 0 && <p className="rmthint">{t("remote.changing_the_port_disconnects_the")}</p>}
 
-      {st.open && (
-        <div className="shareopen">
-          {offer ? (
-            <div className="shareqr">
-              <img src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(offer.qr)}`} alt={t("remote.pairing_qr_code")} width={184} height={184} />
-              <div className="sharehow">
-                <span className="lb">{t("remote.scan_with_your_phones_camera")}</span>
-                <span className="ds">{t("remote.the_code_pairs_one_phone", { time: clock(offer.expires) })}</span>
-                <code dir="ltr">{st.origin}</code>
-                <button className="rmtlnk sharecopy" data-action="share.copy" onClick={() => void copyLink(offer.url)}>
-                  {copied === "done" ? t("common.copied") : copied === "failed" ? t("remote.copy_blocked") : t("remote.copy_pairing_link")}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button className="rmtadd" data-action="share.offer" disabled={busy} onClick={() => void newCode()}>
-              {t("remote.show_a_pairing_code")}
-            </button>
-          )}
+      <label className="rmtf">
+        <span>{t("remote.reverse_proxy_name")}</span>
+        <input
+          data-action="share.public-origin"
+          type="text"
+          value={originDraft ?? st.publicOrigin ?? ""}
+          placeholder="https://studio.example.com"
+          disabled={busy}
+          onChange={(e) => setOriginDraft(e.target.value)}
+          onBlur={commitOrigin}
+        />
+      </label>
+      <p className="rmthint">{t("remote.reverse_proxy_hint")}</p>
+      {st.publicDoorError && (
+        <p className="rmthint" role="alert" data-s="bad">{st.publicDoorError}</p>
+      )}
 
-          <div className="sharedevs">
-            {st.devices.map((d, i) => (
-              <div className="sharedev" key={d.id}>
-                <span className="nm" title={d.name}>{deviceLabel(i)}</span>
-                <span className="st">{d.online ? t("remote.paired_time_online", { time: clock(d.pairedAt) }) : t("remote.paired_time_last_seen_seen", { time: clock(d.pairedAt), seen: clock(d.lastSeen) })}</span>
-                {confirm === d.id ? (
-                  <span className="rmtconfirm" role="alertdialog">
-                    <span>{t("remote.disconnect_this_phone_it_will")}</span>
-                    <button data-action="share.keep" data-target={d.id} onClick={() => setConfirm("")}>{t("common.cancel")}</button>
-                    <button
-                      data-danger=""
-                      data-action="share.revoke"
-                      data-target={d.id}
-                      autoFocus
-                      onClick={() => {
-                        setConfirm("");
-                        void revoke(d.id);
-                      }}
-                    >
-                      {t("remote.disconnect")}
-                    </button>
-                  </span>
-                ) : (
-                  <button className="rmtlnk" data-danger="" data-action="share.ask-revoke" data-target={d.id} onClick={() => setConfirm(d.id)}>
+      {st.open && st.devices.length > 0 && (
+        <div className="sharedevs">
+          {st.devices.map((d, i) => (
+            <div className="sharedev" key={d.id}>
+              <span className="nm" title={d.name}>{deviceLabel(i)}</span>
+              <span className="st">{d.online ? t("remote.paired_time_online", { time: clock(d.pairedAt) }) : t("remote.paired_time_last_seen_seen", { time: clock(d.pairedAt), seen: clock(d.lastSeen) })}</span>
+              {confirm === d.id ? (
+                <span className="rmtconfirm" role="alertdialog">
+                  <span>{t("remote.disconnect_this_phone_it_will")}</span>
+                  <button data-action="share.keep" data-target={d.id} onClick={() => setConfirm("")}>{t("common.cancel")}</button>
+                  <button
+                    data-danger=""
+                    data-action="share.revoke"
+                    data-target={d.id}
+                    autoFocus
+                    onClick={() => {
+                      setConfirm("");
+                      void revoke(d.id);
+                    }}
+                  >
                     {t("remote.disconnect")}
                   </button>
-                )}
-              </div>
-            ))}
-            {st.devices.length === 0 && <p className="rmtempty">{t("remote.no_phone_is_connected_yet")}</p>}
-          </div>
-
-          <p className="sharewarn">
-            {t("remote.the_connection_is_plain_http")}
-          </p>
+                </span>
+              ) : (
+                <button className="rmtlnk" data-danger="" data-action="share.ask-revoke" data-target={d.id} onClick={() => setConfirm(d.id)}>
+                  {t("remote.disconnect")}
+                </button>
+              )}
+            </div>
+          ))}
         </div>
       )}
+      {st.open && st.devices.length === 0 && <p className="rmtempty">{t("remote.no_phone_is_connected_yet")}</p>}
+
+      <p className="sharewarn">
+        {t("remote.the_connection_is_plain_http")}
+      </p>
     </>
   );
 }

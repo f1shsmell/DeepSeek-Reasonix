@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,20 +16,24 @@ import (
 	"reasonix/internal/base/testenv"
 )
 
+// testDoor is the door registry tests mint codes for: any origin spelling
+// with an explicit port, since a gate's origin always names one.
+const testDoor = "http://192.168.1.20:41234"
+
 func TestPairingCodePairsOnce(t *testing.T) {
 	reg := NewDeviceRegistry()
-	code, _ := reg.Offer()
-	cred, view, err := reg.Redeem(code, "Mozilla/5.0 (iPhone)")
+	code, _ := reg.Offer(testDoor)
+	cred, view, err := reg.Redeem(testDoor, code, "Mozilla/5.0 (iPhone)")
 	if err != nil {
 		t.Fatalf("first redeem: %v", err)
 	}
 	if id, ok := reg.Authenticate(cred); !ok || id != view.ID {
 		t.Fatalf("Authenticate = %q %v, want %q", id, ok, view.ID)
 	}
-	if _, _, err := reg.Redeem(code, "second"); !errors.Is(err, ErrPairingInvalid) {
+	if _, _, err := reg.Redeem(testDoor, code, "second"); !errors.Is(err, ErrPairingInvalid) {
 		t.Fatalf("second redeem err = %v, want ErrPairingInvalid", err)
 	}
-	if _, ok := reg.OfferExpires(); ok {
+	if _, ok := reg.OfferExpires(testDoor); ok {
 		t.Fatal("a spent code is still on offer")
 	}
 }
@@ -36,22 +41,75 @@ func TestPairingCodePairsOnce(t *testing.T) {
 func TestPairingCodeLapses(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	reg := newDeviceRegistryAt(func() time.Time { return now })
-	code, _ := reg.Offer()
+	code, _ := reg.Offer(testDoor)
 	now = now.Add(pairingTTL)
-	if _, _, err := reg.Redeem(code, ""); !errors.Is(err, ErrPairingInvalid) {
+	if _, _, err := reg.Redeem(testDoor, code, ""); !errors.Is(err, ErrPairingInvalid) {
 		t.Fatalf("redeem at expiry err = %v, want ErrPairingInvalid", err)
 	}
 }
 
 func TestANewOfferRetiresTheOldCode(t *testing.T) {
 	reg := NewDeviceRegistry()
-	old, _ := reg.Offer()
-	fresh, _ := reg.Offer()
-	if _, _, err := reg.Redeem(old, ""); !errors.Is(err, ErrPairingInvalid) {
+	old, _ := reg.Offer(testDoor)
+	fresh, _ := reg.Offer(testDoor)
+	if _, _, err := reg.Redeem(testDoor, old, ""); !errors.Is(err, ErrPairingInvalid) {
 		t.Fatalf("superseded code err = %v, want ErrPairingInvalid", err)
 	}
-	if _, _, err := reg.Redeem(fresh, ""); err != nil {
+	if _, _, err := reg.Redeem(testDoor, fresh, ""); err != nil {
 		t.Fatalf("current code: %v", err)
+	}
+}
+
+func TestADoorSpendsOnlyItsOwnCode(t *testing.T) {
+	reg := NewDeviceRegistry()
+	code, _ := reg.Offer(testDoor)
+	other := "http://192.168.1.21:41234"
+	if _, _, err := reg.Redeem(other, code, ""); !errors.Is(err, ErrPairingInvalid) {
+		t.Fatalf("a LAN code redeemed at another door err = %v, want ErrPairingInvalid", err)
+	}
+	if _, ok := reg.OfferExpires(testDoor); !ok {
+		t.Fatal("the refused spend consumed the code it was not named for")
+	}
+	if _, _, err := reg.Redeem(testDoor, code, ""); err != nil {
+		t.Fatalf("the code still answers at its own door: %v", err)
+	}
+}
+
+func TestEachDoorHoldsItsOwnCode(t *testing.T) {
+	reg := NewDeviceRegistry()
+	lan := "http://192.168.1.20:41234"
+	net := "http://192.168.1.21:41234"
+	lanCode, _ := reg.Offer(lan)
+	netCode, _ := reg.Offer(net)
+	if lanCode == netCode {
+		t.Fatal("two doors were dealt one code")
+	}
+	if _, _, err := reg.Redeem(net, netCode, "phone"); err != nil {
+		t.Fatalf("the second door's own code: %v", err)
+	}
+	if _, ok := reg.OfferExpires(lan); !ok {
+		t.Fatal("one door's spend consumed the other's offer")
+	}
+	if _, _, err := reg.Redeem(lan, lanCode, "phone"); err != nil {
+		t.Fatalf("the first door's code after the second spent: %v", err)
+	}
+}
+
+func TestWithdrawTakesOneDoorsCodeOnly(t *testing.T) {
+	reg := NewDeviceRegistry()
+	lan := "http://192.168.1.20:41234"
+	net := "http://192.168.1.21:41234"
+	reg.Offer(lan)
+	netCode, _ := reg.Offer(net)
+	reg.Withdraw(lan)
+	if _, ok := reg.OfferExpires(lan); ok {
+		t.Fatal("a withdrawn door still offers a code")
+	}
+	if _, ok := reg.OfferExpires(net); !ok {
+		t.Fatal("withdrawing one door consumed the other's offer")
+	}
+	if _, _, err := reg.Redeem(net, netCode, "phone"); err != nil {
+		t.Fatalf("the untouched door's code: %v", err)
 	}
 }
 
@@ -63,6 +121,150 @@ func TestShareRefusesAnAddressItDoesNotList(t *testing.T) {
 		if _, err := share.Open(ip); !errors.Is(err, ErrShareAddress) {
 			t.Fatalf("Open(%q) err = %v, want ErrShareAddress", ip, err)
 		}
+	}
+}
+
+// twoLoops is the address seam a test uses when it needs two doors that both
+// really bind: 127.0.0.2 answers alongside 127.0.0.1 on the loopback network.
+func twoLoops(t *testing.T, share *DeviceShare) {
+	t.Helper()
+	share.addresses = func() []ShareAddress {
+		return []ShareAddress{{Interface: "lo", IP: "127.0.0.1", Kind: AddressLAN}, {Interface: "lo", IP: "127.0.0.2", Kind: AddressLAN}}
+	}
+}
+
+func TestTheShareAnswersOnTwoAddressesAtOnce(t *testing.T) {
+	share := NewDeviceShare(fstest.MapFS{"index.html": {Data: []byte("x")}})
+	twoLoops(t, share)
+	// The kernel behind the gate answers everything it is handed: what this
+	// test watches for is both doors reaching it.
+	share.Attach(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(share.Close)
+
+	if _, err := share.Open("127.0.0.1"); err != nil {
+		t.Fatalf("open the first door: %v", err)
+	}
+	if _, err := share.Open("127.0.0.2"); err != nil {
+		t.Fatalf("open the second door: %v", err)
+	}
+	st := share.Status()
+	if len(st.Doors) != 2 {
+		t.Fatalf("doors = %+v, want two", st.Doors)
+	}
+	if st.Doors[0].Address != "127.0.0.1" || st.Doors[1].Address != "127.0.0.2" {
+		t.Fatalf("doors = %+v, want the order they opened in", st.Doors)
+	}
+	for _, door := range st.Doors {
+		resp, err := http.Get(door.Origin + "/")
+		if err != nil {
+			t.Fatalf("GET %s: %v", door.Origin, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s = %d, want the page", door.Origin, resp.StatusCode)
+		}
+	}
+}
+
+func TestAnOpenDoorIsAnIdempotentAnswer(t *testing.T) {
+	share := NewDeviceShare(fstest.MapFS{"index.html": {Data: []byte("x")}})
+	twoLoops(t, share)
+	share.Attach(http.NotFoundHandler())
+	t.Cleanup(share.Close)
+
+	st, err := share.Open("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := share.Open("127.0.0.1")
+	if err != nil {
+		t.Fatalf("open again: %v", err)
+	}
+	if len(again.Doors) != 1 || again.Doors[0].Origin != st.Doors[0].Origin {
+		t.Fatalf("open again = %+v, want the same door left standing", again.Doors)
+	}
+}
+
+func TestDoorsShareOnePort(t *testing.T) {
+	share := NewDeviceShare(nil)
+	twoLoops(t, share)
+	share.Attach(http.NotFoundHandler())
+	t.Cleanup(share.Close)
+
+	if _, err := share.Open("127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := share.Open("127.0.0.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Doors[1].Origin == st.Doors[0].Origin {
+		t.Fatal("two doors answered on one origin")
+	}
+	_, portA, _ := net.SplitHostPort(strings.TrimPrefix(st.Doors[0].Origin, "http://"))
+	_, portB, _ := net.SplitHostPort(strings.TrimPrefix(st.Doors[1].Origin, "http://"))
+	if portA != portB {
+		t.Fatalf("the second door answered on port %s, the first bound %s", portB, portA)
+	}
+}
+
+func TestClosingOneDoorLeavesTheOtherAnswering(t *testing.T) {
+	share := NewDeviceShare(fstest.MapFS{"index.html": {Data: []byte("x")}})
+	twoLoops(t, share)
+	share.Attach(http.NotFoundHandler())
+	t.Cleanup(share.Close)
+
+	if _, err := share.Open("127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := share.Open("127.0.0.2"); err != nil {
+		t.Fatal(err)
+	}
+	st := share.Status()
+	closed, kept := st.Doors[0], st.Doors[1]
+
+	// Pair at the door that stays, the way a phone would have.
+	offer, err := share.Offer(kept.Address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := offer.URL[strings.Index(offer.URL, "#pair=")+len("#pair="):]
+	pairReq, _ := http.NewRequest(http.MethodPost, kept.Origin+PairPath, strings.NewReader(`{"code":"`+code+`"}`))
+	pairReq.Header.Set("Content-Type", "application/json")
+	pairReq.Header.Set("Origin", kept.Origin)
+	pairResp, err := http.DefaultClient.Do(pairReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cookie *http.Cookie
+	for _, c := range pairResp.Cookies() {
+		if c.Name == DeviceCookie {
+			cookie = c
+		}
+	}
+	pairResp.Body.Close()
+	if cookie == nil {
+		t.Fatal("pairing set no device cookie")
+	}
+
+	if _, err := share.CloseAddress(closed.Address); err != nil {
+		t.Fatal(err)
+	}
+	if now := share.Status(); len(now.Doors) != 1 || now.Doors[0].Address != kept.Address {
+		t.Fatalf("doors after the close = %+v, want only %s", now.Doors, kept.Address)
+	}
+	if _, err := share.Offer(closed.Address); !errors.Is(err, ErrShareClosed) {
+		t.Fatalf("offer at a closed door = %v, want ErrShareClosed", err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, kept.Origin+DevicePath, nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("the kept door for a device paired on it: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("device at the kept door = %d, want 200", resp.StatusCode)
 	}
 }
 
@@ -97,13 +299,13 @@ func newShareRig(t *testing.T) *shareRig {
 	if err != nil {
 		t.Fatalf("open share: %v", err)
 	}
-	return &shareRig{hub: h, share: share, window: window, origin: st.Origin}
+	return &shareRig{hub: h, share: share, window: window, origin: st.Doors[0].Origin}
 }
 
 // pair scans a fresh code the way the page does and returns the device cookie.
 func (r *shareRig) pair(t *testing.T) *http.Cookie {
 	t.Helper()
-	offer, err := r.share.Offer()
+	offer, err := r.share.Offer("127.0.0.1")
 	if err != nil {
 		t.Fatalf("offer: %v", err)
 	}
@@ -276,7 +478,7 @@ func TestClosingTheShareUnpairsEveryDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rig.origin = st.Origin
+	rig.origin = st.Doors[0].Origin
 	if len(st.Devices) != 0 {
 		t.Fatalf("reopened share lists %+v, want no devices", st.Devices)
 	}

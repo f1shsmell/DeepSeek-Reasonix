@@ -41,15 +41,15 @@ func TestOpenListensOnTheFixedPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "http://127.0.0.1:" + strconv.Itoa(port); st.Origin != want || st.Port != port {
-		t.Fatalf("origin = %q port = %d, want %q and %d", st.Origin, st.Port, want, port)
+	if want := "http://127.0.0.1:" + strconv.Itoa(port); st.Doors[0].Origin != want || st.Port != port {
+		t.Fatalf("origin = %q port = %d, want %q and %d", st.Doors[0].Origin, st.Port, want, port)
 	}
 }
 
 func TestOpenWithoutAPortStillPicksOne(t *testing.T) {
 	share := loopbackShare(t)
 	st, err := share.Open("127.0.0.1")
-	if err != nil || st.Port != 0 || strings.HasSuffix(st.Origin, ":0") {
+	if err != nil || st.Port != 0 || strings.HasSuffix(st.Doors[0].Origin, ":0") {
 		t.Fatalf("Open = %+v, %v, want a system-picked port and none configured", st, err)
 	}
 }

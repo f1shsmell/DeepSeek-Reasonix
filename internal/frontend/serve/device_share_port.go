@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 
 	"reasonix/internal/contract/config"
 )
@@ -44,6 +45,34 @@ func persistSharePort(port int) error {
 		return err
 	}
 	return cfg.SaveTo(path)
+}
+
+// SetPublicOriginSetting validates the name, stores it in the user config and
+// brings the proxy's door up or takes it down with the name. No standing
+// phone door moves: the name lands with the doors opened next, which is the
+// whole point — a phone paired on its door keeps that door.
+func (s *DeviceShare) SetPublicOriginSetting(raw string) error {
+	unlock := config.LockUserConfigEdits()
+	path := config.UserConfigPath()
+	cfg := config.LoadForEdit(path)
+	if err := cfg.SetSharePublicOrigin(raw); err != nil {
+		unlock()
+		return err
+	}
+	if err := cfg.SaveTo(path); err != nil {
+		unlock()
+		return err
+	}
+	unlock()
+	if strings.TrimSpace(raw) == "" {
+		s.CloseAddress(publicDoorIP)
+		s.mu.Lock()
+		s.publicDoorErr = ""
+		s.mu.Unlock()
+		return nil
+	}
+	s.ensurePublicDoor()
+	return nil
 }
 
 // SetRemember saves [serve] remember_paired_devices to the user config. The

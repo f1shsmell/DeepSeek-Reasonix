@@ -57,8 +57,14 @@ func renderServeSection(b *strings.Builder, c *Config) {
 		b.WriteString("# remember_paired_devices = true   # keep the phones that paired; a restart reopens the share and adopts them\n")
 	}
 	if c.Serve.SharePort != 0 {
-		fmt.Fprintf(b, "share_port = %d   # fixed port of the phone-access LAN link; unset picks a free one each time\n\n", c.Serve.SharePort)
-		return
+		fmt.Fprintf(b, "share_port = %d   # fixed port of the phone-access LAN link; unset picks a free one each time\n", c.Serve.SharePort)
+	} else {
+		b.WriteString("# share_port = 41234   # fixed port of the phone-access LAN link; unset picks a free one each time\n")
 	}
-	b.WriteString("# share_port = 41234   # fixed port of the phone-access LAN link; unset picks a free one each time\n\n")
+	if c.Serve.SharePublicOrigin != "" {
+		fmt.Fprintf(b, "share_public_origin = %q   # the reverse proxy's name for this Studio; phones arrive there, TLS ends at your side\n", c.Serve.SharePublicOrigin)
+	} else {
+		b.WriteString("# share_public_origin = \"https://studio.example.com\"   # the reverse proxy's name for this Studio; phones arrive there, TLS ends at your side\n")
+	}
+	b.WriteString("\n")
 }

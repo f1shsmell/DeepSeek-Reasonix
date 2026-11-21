@@ -422,6 +422,13 @@ func assemble(ctx context.Context, logs, handshakeTo io.Writer, shell shellIdent
 	// with the rest of the kernel, keeping the phones this machine already adopted.
 	share := serve.NewDeviceShare(page)
 	share.RestorePort(cfg.SharePort())
+	share.SetPublicOrigin(func() string {
+		loaded, err := config.Load()
+		if err != nil {
+			return ""
+		}
+		return loaded.SharePublicOrigin()
+	})
 	go func() {
 		<-ctx.Done()
 		share.Shutdown()
@@ -459,7 +466,7 @@ func assemble(ctx context.Context, logs, handshakeTo io.Writer, shell shellIdent
 	// to one this machine now offers, at the cost of one fresh scan.
 	state := share.RestoreState()
 	if state.Open {
-		if _, err := share.Reopen(state.Address); err != nil {
+		if _, err := share.Reopen(state.Addresses); err != nil {
 			fmt.Fprintln(logs, "reasonix-studio-host: could not reopen phone access:", err)
 		}
 	}
