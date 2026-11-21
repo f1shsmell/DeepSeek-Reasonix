@@ -459,7 +459,7 @@ func assemble(ctx context.Context, logs, handshakeTo io.Writer, shell shellIdent
 	// to one this machine now offers, at the cost of one fresh scan.
 	state := share.RestoreState()
 	if state.Open {
-		if _, err := share.Reopen(state.Address); err != nil {
+		if _, err := share.Reopen(state.Addresses); err != nil {
 			fmt.Fprintln(logs, "reasonix-studio-host: could not reopen phone access:", err)
 		}
 	}

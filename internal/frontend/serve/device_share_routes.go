@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"reasonix/internal/contract/config"
 )
@@ -119,14 +120,55 @@ func (h *Hub) shareRememberSave(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Hub) shareClose(w http.ResponseWriter, _ *http.Request) {
+func (h *Hub) shareClose(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IP string `json:"ip"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body)
+	}
+	if ip := strings.TrimSpace(body.IP); ip != "" {
+		st, err := h.opts.Share.CloseAddress(ip)
+		switch {
+		case errors.Is(err, ErrShareAddress):
+			refuse(w, http.StatusBadRequest, codeShareAddress, err.Error(), map[string]any{"ip": ip})
+		case err != nil:
+			writeErr(w, http.StatusInternalServerError, err)
+		default:
+			writeJSON(w, st)
+		}
+		return
+	}
 	h.opts.Share.Close()
 	writeJSON(w, h.opts.Share.Status())
 }
 
-func (h *Hub) shareOffer(w http.ResponseWriter, _ *http.Request) {
+func (h *Hub) shareOffer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	offer, err := h.opts.Share.Offer()
+	var body struct {
+		IP string `json:"ip"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body)
+	}
+	ip := strings.TrimSpace(body.IP)
+	if ip == "" {
+		// A caller that does not name a door is answered by the only one there
+		// is; naming among several is the caller's job.
+		doors := h.opts.Share.Status().Doors
+		switch {
+		case len(doors) == 1:
+			ip = doors[0].Address
+		case len(doors) == 0:
+			refuse(w, http.StatusConflict, codeShareClosed, ErrShareClosed.Error(), nil)
+		default:
+			missingField(w, "ip")
+		}
+		if ip == "" {
+			return
+		}
+	}
+	offer, err := h.opts.Share.Offer(ip)
 	switch {
 	case errors.Is(err, ErrShareClosed):
 		refuse(w, http.StatusConflict, codeShareClosed, err.Error(), nil)

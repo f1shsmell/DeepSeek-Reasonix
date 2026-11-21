@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -123,6 +124,150 @@ func TestShareRefusesAnAddressItDoesNotList(t *testing.T) {
 	}
 }
 
+// twoLoops is the address seam a test uses when it needs two doors that both
+// really bind: 127.0.0.2 answers alongside 127.0.0.1 on the loopback network.
+func twoLoops(t *testing.T, share *DeviceShare) {
+	t.Helper()
+	share.addresses = func() []ShareAddress {
+		return []ShareAddress{{Interface: "lo", IP: "127.0.0.1", Kind: AddressLAN}, {Interface: "lo", IP: "127.0.0.2", Kind: AddressLAN}}
+	}
+}
+
+func TestTheShareAnswersOnTwoAddressesAtOnce(t *testing.T) {
+	share := NewDeviceShare(fstest.MapFS{"index.html": {Data: []byte("x")}})
+	twoLoops(t, share)
+	// The kernel behind the gate answers everything it is handed: what this
+	// test watches for is both doors reaching it.
+	share.Attach(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(share.Close)
+
+	if _, err := share.Open("127.0.0.1"); err != nil {
+		t.Fatalf("open the first door: %v", err)
+	}
+	if _, err := share.Open("127.0.0.2"); err != nil {
+		t.Fatalf("open the second door: %v", err)
+	}
+	st := share.Status()
+	if len(st.Doors) != 2 {
+		t.Fatalf("doors = %+v, want two", st.Doors)
+	}
+	if st.Doors[0].Address != "127.0.0.1" || st.Doors[1].Address != "127.0.0.2" {
+		t.Fatalf("doors = %+v, want the order they opened in", st.Doors)
+	}
+	for _, door := range st.Doors {
+		resp, err := http.Get(door.Origin + "/")
+		if err != nil {
+			t.Fatalf("GET %s: %v", door.Origin, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s = %d, want the page", door.Origin, resp.StatusCode)
+		}
+	}
+}
+
+func TestAnOpenDoorIsAnIdempotentAnswer(t *testing.T) {
+	share := NewDeviceShare(fstest.MapFS{"index.html": {Data: []byte("x")}})
+	twoLoops(t, share)
+	share.Attach(http.NotFoundHandler())
+	t.Cleanup(share.Close)
+
+	st, err := share.Open("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := share.Open("127.0.0.1")
+	if err != nil {
+		t.Fatalf("open again: %v", err)
+	}
+	if len(again.Doors) != 1 || again.Doors[0].Origin != st.Doors[0].Origin {
+		t.Fatalf("open again = %+v, want the same door left standing", again.Doors)
+	}
+}
+
+func TestDoorsShareOnePort(t *testing.T) {
+	share := NewDeviceShare(nil)
+	twoLoops(t, share)
+	share.Attach(http.NotFoundHandler())
+	t.Cleanup(share.Close)
+
+	if _, err := share.Open("127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := share.Open("127.0.0.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Doors[1].Origin == st.Doors[0].Origin {
+		t.Fatal("two doors answered on one origin")
+	}
+	_, portA, _ := net.SplitHostPort(strings.TrimPrefix(st.Doors[0].Origin, "http://"))
+	_, portB, _ := net.SplitHostPort(strings.TrimPrefix(st.Doors[1].Origin, "http://"))
+	if portA != portB {
+		t.Fatalf("the second door answered on port %s, the first bound %s", portB, portA)
+	}
+}
+
+func TestClosingOneDoorLeavesTheOtherAnswering(t *testing.T) {
+	share := NewDeviceShare(fstest.MapFS{"index.html": {Data: []byte("x")}})
+	twoLoops(t, share)
+	share.Attach(http.NotFoundHandler())
+	t.Cleanup(share.Close)
+
+	if _, err := share.Open("127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := share.Open("127.0.0.2"); err != nil {
+		t.Fatal(err)
+	}
+	st := share.Status()
+	closed, kept := st.Doors[0], st.Doors[1]
+
+	// Pair at the door that stays, the way a phone would have.
+	offer, err := share.Offer(kept.Address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := offer.URL[strings.Index(offer.URL, "#pair=")+len("#pair="):]
+	pairReq, _ := http.NewRequest(http.MethodPost, kept.Origin+PairPath, strings.NewReader(`{"code":"`+code+`"}`))
+	pairReq.Header.Set("Content-Type", "application/json")
+	pairReq.Header.Set("Origin", kept.Origin)
+	pairResp, err := http.DefaultClient.Do(pairReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cookie *http.Cookie
+	for _, c := range pairResp.Cookies() {
+		if c.Name == DeviceCookie {
+			cookie = c
+		}
+	}
+	pairResp.Body.Close()
+	if cookie == nil {
+		t.Fatal("pairing set no device cookie")
+	}
+
+	if _, err := share.CloseAddress(closed.Address); err != nil {
+		t.Fatal(err)
+	}
+	if now := share.Status(); len(now.Doors) != 1 || now.Doors[0].Address != kept.Address {
+		t.Fatalf("doors after the close = %+v, want only %s", now.Doors, kept.Address)
+	}
+	if _, err := share.Offer(closed.Address); !errors.Is(err, ErrShareClosed) {
+		t.Fatalf("offer at a closed door = %v, want ErrShareClosed", err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, kept.Origin+DevicePath, nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("the kept door for a device paired on it: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("device at the kept door = %d, want 200", resp.StatusCode)
+	}
+}
+
 // shareRig is a window's hub with the share open on loopback, which stands in
 // for the private address a real share binds.
 type shareRig struct {
@@ -154,13 +299,13 @@ func newShareRig(t *testing.T) *shareRig {
 	if err != nil {
 		t.Fatalf("open share: %v", err)
 	}
-	return &shareRig{hub: h, share: share, window: window, origin: st.Origin}
+	return &shareRig{hub: h, share: share, window: window, origin: st.Doors[0].Origin}
 }
 
 // pair scans a fresh code the way the page does and returns the device cookie.
 func (r *shareRig) pair(t *testing.T) *http.Cookie {
 	t.Helper()
-	offer, err := r.share.Offer()
+	offer, err := r.share.Offer("127.0.0.1")
 	if err != nil {
 		t.Fatalf("offer: %v", err)
 	}
@@ -333,7 +478,7 @@ func TestClosingTheShareUnpairsEveryDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rig.origin = st.Origin
+	rig.origin = st.Doors[0].Origin
 	if len(st.Devices) != 0 {
 		t.Fatalf("reopened share lists %+v, want no devices", st.Devices)
 	}
