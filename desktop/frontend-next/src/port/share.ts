@@ -45,16 +45,27 @@ export interface DeviceSelf {
   machine: string;
 }
 
+// One address the share answers on: the adapter a phone dials, the origin it
+// is addressed by, and that door's own pairing code's clock.
+export interface ShareDoor {
+  address: string;
+  interface?: string;
+  kind: AddressKind;
+  origin: string;
+  offerExpires?: string;
+}
+
 export interface ShareStatus {
   open: boolean;
   // The fixed port the user chose; absent means the system picks one each time.
   port?: number;
-  origin?: string;
+  // The addresses currently answering, in the order they opened. A share may
+  // answer on more than one; every door holds its own pairing code.
+  doors: ShareDoor[];
   addresses: ShareAddress[];
   devices: PairedDevice[];
   cloudDevices: CloudDevice[];
   cloudRemote?: CloudRemoteStatus;
-  offerExpires?: string;
 }
 
 export interface ShareOffer {
@@ -97,14 +108,15 @@ export interface SharePort {
   // phone that is itself paired.
   shareStatus(): Promise<ShareStatus | null>;
   openShare(ip: string): Promise<ShareStatus>;
-  closeShare(): Promise<ShareStatus>;
-  // Zero clears the choice. Used the next time the door opens.
+  // An address closes that one door; none closes the whole share.
+  closeShare(ip?: string): Promise<ShareStatus>;
+  // Zero clears the choice. Used by the doors opened next.
   setSharePort(port: number): Promise<ShareStatus>;
   // Whether this install keeps the phones that paired across restarts. Null
   // where the reading failed: the share routes exist only on a window's kernel.
   shareRemember(): Promise<{ remember: boolean } | null>;
   setShareRemember(remember: boolean): Promise<{ remember: boolean }>;
-  offerShare(): Promise<ShareOffer>;
+  offerShare(ip: string): Promise<ShareOffer>;
   offerCloudShare(): Promise<CloudShareOffer>;
   revokeDevice(id: string): Promise<ShareStatus>;
   // The devices enrolled against this Studio at the account service. Null where

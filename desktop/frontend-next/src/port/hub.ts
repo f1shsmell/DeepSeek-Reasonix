@@ -658,8 +658,8 @@ export class SseHub implements HubPort {
     return this.post<ShareStatus>("/share/open", { ip });
   }
 
-  closeShare() {
-    return this.post<ShareStatus>("/share/close", {});
+  closeShare(ip?: string) {
+    return this.post<ShareStatus>("/share/close", ip ? { ip } : {});
   }
 
   async shareRemember() {
@@ -676,8 +676,8 @@ export class SseHub implements HubPort {
     return this.post<ShareStatus>("/share/port", { port });
   }
 
-  offerShare() {
-    return this.post<ShareOffer>("/share/offer", {});
+  offerShare(ip: string) {
+    return this.post<ShareOffer>("/share/offer", { ip });
   }
 
   offerCloudShare() {

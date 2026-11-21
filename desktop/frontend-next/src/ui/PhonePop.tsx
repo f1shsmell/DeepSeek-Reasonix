@@ -6,7 +6,7 @@ import type { HubPort } from "../port/hub";
 import type { CloudDevice, CloudRemoteStatus, PairedDevice } from "../port/share";
 import { copyText } from "./CopyButton";
 import { useDismiss } from "./dismiss";
-import { clock, deviceLabel, type Share, useShare } from "./PhoneAccess";
+import { addressLabel, clock, deviceLabel, type Share, useShare } from "./PhoneAccess";
 import { Switch } from "./Switch";
 import { TooltipButton } from "./TooltipButton";
 
@@ -23,39 +23,30 @@ export function PhonePop({ hub }: { hub: HubPort }) {
   // A failure in the card is said in the card, next to what failed.
   const [failure, setFailure] = useState("");
   const share = useShare(hub, useCallback((e: unknown) => setFailure(reason(e)), []));
-  const { refresh, newCode, newCloudCode } = share;
+  const { refresh, newCloudCode } = share;
   const shareOpen = share.st?.open ?? false;
-  const offerHeld = useRef(false);
-  offerHeld.current = share.offer !== null;
   const cloudOfferHeld = useRef(false);
   cloudOfferHeld.current = share.cloudOffer !== null;
 
-  // Opening the card is asking for a code, once per opening: after a phone
-  // spends it, the next one is asked for by hand. Another surface may have shut
-  // the door since the card was last drawn, so the code waits for the read.
-  const minted = useRef(false);
+  // Opening the card asks the account-gated door for its picture — that one
+  // is not spent by scanning, so it is kept across openings. A LAN code is
+  // one person's to spend; its mint waits for the press on its own row.
   useEffect(() => {
     if (!open) {
-      minted.current = false;
       setFailure("");
       return;
     }
     let live = true;
     refresh()
       .then((now) => {
-        if (!live || minted.current) return;
-        minted.current = true;
-        if (now?.cloudRemote?.online && !cloudOfferHeld.current) {
-          void newCloudCode();
-        } else if (now?.open && !(offerHeld.current && now.offerExpires)) {
-          void newCode();
-        }
+        if (!live) return;
+        if (now?.cloudRemote?.online && !cloudOfferHeld.current) void newCloudCode();
       })
       .catch(() => {});
     return () => {
       live = false;
     };
-  }, [open, refresh, newCode, newCloudCode]);
+  }, [open, refresh, newCloudCode]);
 
   const localNote = usePresenceNote(share.st?.devices, open);
   const cloudNote = useCloudPresenceNote(share.st?.cloudDevices, open);
@@ -163,16 +154,21 @@ function useCloudPresenceNote(devices: CloudDevice[] | undefined, open: boolean)
 }
 
 /** The phones already connected, then the two ways a phone gets here: the
- *  same network, which has to be switched on, and the account-gated relay. */
+ *  doors this window answers on, each with its own code, and the
+ *  account-gated relay. The master switch is here; each door's switch lives
+ *  in settings, where the doors are named. */
 function PhoneCard({ share, failure }: { share: Share; failure: string }) {
-  const { st, ip, pick, offer, cloudOffer, busy, newCode, newCloudCode, toggle, revoke } = share;
+  const { st, offers, cloudOffer, busy, newCode, newCloudCode, toggle, revoke } = share;
   const [copied, setCopied] = useState(false);
   const [arming, setArming] = useState("");
   const arm = useRef<number | null>(null);
   useEffect(() => () => { if (arm.current !== null) window.clearTimeout(arm.current); }, []);
   if (!st) return null;
   const noNetwork = st.addresses.length === 0;
-  const chosen = ip || (st.open ? st.origin?.replace(/^https?:\/\//, "").replace(/:\d+$/, "") : "") || st.addresses[0]?.ip || "";
+  const doorLabel = (address: string) => {
+    const a = st.addresses.find((x) => x.ip === address);
+    return a ? addressLabel(a) : address;
+  };
 
   const copy = (url: string) =>
     copyText(url)
@@ -251,45 +247,32 @@ function PhoneCard({ share, failure }: { share: Share; failure: string }) {
         <div className="pc-hd">
           <span>
             <b>{t("remote.same_wifi")}</b>
-            <small>{chosen ? t("remote.ip_fastest", { ip: chosen }) : t("remote.faster_without_the_relay")}</small>
+            <small>{st.open ? t("remote.n_networks_answering", { n: st.doors.length }) : t("remote.faster_without_the_relay")}</small>
           </span>
           <Switch data-action="share.toggle" on={st.open} busy={busy || noNetwork} label={t("remote.allow_local_network_access")} onClick={() => void toggle()} />
         </div>
 
-        {st.open && (
-          <div className="pc-code">
-            {offer ? (
-              <>
-                <img src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(offer.qr)}`} alt={t("remote.pairing_qr_code")} width={148} height={148} />
-                <span className="pc-side">
-                  <span className="pc-when">{t("remote.local_pairing_valid_until_time", { time: clock(offer.expires) })}</span>
-                  <span className="pc-acts">
-                    <button data-action="share.copy" onClick={() => void copy(offer.url)}>{copied ? t("common.copied") : t("remote.copy_link")}</button>
-                    <i aria-hidden="true" />
-                    <button data-action="share.offer" disabled={busy} onClick={() => void newCode()}>{t("common.new_code")}</button>
-                  </span>
+        {st.doors.map((door) => {
+          const offer = offers[door.address];
+          return offer ? (
+            <div className="pc-code" key={door.address}>
+              <img src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(offer.qr)}`} alt={t("remote.pairing_qr_code")} width={148} height={148} />
+              <span className="pc-side">
+                <span className="pc-when">{doorLabel(door.address)}</span>
+                <span className="pc-when">{t("remote.local_pairing_valid_until_time", { time: clock(offer.expires) })}</span>
+                <span className="pc-acts">
+                  <button data-action="share.copy" onClick={() => void copy(offer.url)}>{copied ? t("common.copied") : t("remote.copy_link")}</button>
+                  <i aria-hidden="true" />
+                  <button data-action="share.offer" data-target={door.address} disabled={busy} onClick={() => void newCode(door.address)}>{t("common.new_code")}</button>
                 </span>
-              </>
-            ) : (
-              <button className="pc-mint" data-action="share.offer" disabled={busy} onClick={() => void newCode()}>
-                {t("remote.show_local_network_qr_code")}
-              </button>
-            )}
-          </div>
-        )}
-
-        {st.addresses.length > 1 && (
-          <label className="pc-row">
-            <span>{t("common.network")}</span>
-            <select data-size="sm" data-action="share.address" value={chosen} disabled={busy} onChange={(e) => pick(e.target.value)}>
-              {st.addresses.map((a) => (
-                <option key={a.ip} value={a.ip}>
-                  {a.kind === "tailnet" ? `${a.ip} · Tailscale` : a.kind === "virtual" ? `${a.ip} · ${t("remote.virtual_adapter")}` : `${a.ip} · ${a.interface}`}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
+              </span>
+            </div>
+          ) : (
+            <button className="pc-mint" key={door.address} data-action="share.offer" data-target={door.address} disabled={busy} onClick={() => void newCode(door.address)}>
+              {t("remote.show_a_pairing_code")}
+            </button>
+          );
+        })}
         {st.open && st.devices.length === 0 && <p className="pc-none">{t("remote.no_phone_connected_yet")}</p>}
       </section>
 

@@ -357,6 +357,7 @@ export class MockHub implements HubPort {
 
   private share: ShareStatus = {
     open: false,
+    doors: [],
     addresses: [
       { interface: "Wi-Fi", ip: "192.168.1.20", kind: "lan" },
       { interface: "Tailscale", ip: "100.101.7.3", kind: "tailnet" },
@@ -391,7 +392,11 @@ export class MockHub implements HubPort {
   }
 
   openShare(ip: string) {
-    this.share = { ...this.share, open: true, origin: `http://${ip}:${this.share.port ?? 41234}`, devices: [] };
+    const origin = `http://${ip}:${this.share.port ?? 41234}`;
+    const doors = this.share.doors.some((d) => d.address === ip)
+      ? this.share.doors
+      : [...this.share.doors, { address: ip, interface: this.share.addresses.find((a) => a.ip === ip)?.interface, kind: this.share.addresses.find((a) => a.ip === ip)?.kind ?? "lan", origin }];
+    this.share = { ...this.share, open: true, doors };
     return Promise.resolve({ ...this.share });
   }
 
@@ -411,16 +416,23 @@ export class MockHub implements HubPort {
     return Promise.resolve({ remember: this.remember });
   }
 
-  closeShare() {
-    this.share = { ...this.share, open: false, origin: undefined, devices: [], offerExpires: undefined };
+  closeShare(ip?: string) {
+    if (ip) {
+      const doors = this.share.doors.filter((d) => d.address !== ip);
+      this.share = { ...this.share, open: doors.length > 0, doors };
+    } else {
+      this.share = { ...this.share, open: false, doors: [], devices: [] };
+    }
     return Promise.resolve({ ...this.share });
   }
 
-  offerShare() {
+  offerShare(ip: string) {
+    const door = this.share.doors.find((d) => d.address === ip);
+    if (!door) return Promise.reject(new Error("share closed"));
     const expires = new Date(Date.now() + 5 * 60_000).toISOString();
-    this.share = { ...this.share, offerExpires: expires };
+    this.share = { ...this.share, doors: this.share.doors.map((d) => (d.address === ip ? { ...d, offerExpires: expires } : d)) };
     const qr = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 29 29"><rect width="29" height="29" fill="#fff"/><path fill="#000" d="M4 4h7v7h-7zM18 4h7v7h-7zM4 18h7v7h-7zM13 13h3v3h-3z"/></svg>`;
-    return Promise.resolve({ url: `${this.share.origin}/#pair=mock-code`, qr, expires });
+    return Promise.resolve({ url: `${door.origin}/#pair=mock-code`, qr, expires });
   }
 
   offerCloudShare() {
