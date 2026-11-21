@@ -26,14 +26,17 @@ const (
 // expired or superseded. The caller learns nothing about which.
 var ErrPairingInvalid = errors.New("pairing code is not valid")
 
-// DeviceRegistry holds which devices may reach a kernel and the one pairing
-// code that can add another. Only digests are kept: a registry dumped from
-// memory hands out no credential. A host that gives it a persist hook survives
-// a restart with its devices paired; without one it lives for the process.
+// DeviceRegistry holds which devices may reach a kernel and the pairing codes
+// that can add another, one on offer per door. The code is spent at the
+// address it names: a code minted for one door cannot be redeemed at another,
+// so a LAN code photographed off the screen is not spendable through a public
+// one. Only digests are kept: a registry dumped from memory hands out no
+// credential. A host that gives it a persist hook survives a restart with its
+// devices paired; without one it lives for the process.
 type DeviceRegistry struct {
 	mu      sync.Mutex
 	now     func() time.Time
-	pending pairingOffer
+	offers  map[string]pairingOffer
 	devices map[string]*pairedDevice
 	// rev counts every change to the paired set. A snapshot taken before a
 	// later change carries a stale rev and is dropped before it is written,
@@ -46,7 +49,7 @@ type DeviceRegistry struct {
 	persist func([]persistedDevice)
 }
 
-// pairingOffer is the code on screen. A zero digest is no offer.
+// pairingOffer is the code on offer for one door. A zero digest is no offer.
 type pairingOffer struct {
 	digest  [sha256.Size]byte
 	expires time.Time
@@ -83,50 +86,67 @@ func NewDeviceRegistry() *DeviceRegistry {
 }
 
 func newDeviceRegistryAt(now func() time.Time) *DeviceRegistry {
-	return &DeviceRegistry{now: now, devices: map[string]*pairedDevice{}}
+	return &DeviceRegistry{now: now, offers: map[string]pairingOffer{}, devices: map[string]*pairedDevice{}}
 }
 
-// Offer mints the code a new device pairs with, replacing any earlier one.
-func (d *DeviceRegistry) Offer() (code string, expires time.Time) {
+// Offer mints the code a new device pairs with at door, replacing that door's
+// earlier one. Other doors keep theirs: a code is the credential for the
+// address it names, and one door's business is not another's.
+func (d *DeviceRegistry) Offer(door string) (code string, expires time.Time) {
 	code = randomSecret()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	expires = d.now().Add(pairingTTL)
-	d.pending = pairingOffer{digest: sha256.Sum256([]byte(code)), expires: expires}
+	d.offers[door] = pairingOffer{digest: sha256.Sum256([]byte(code)), expires: expires}
 	return code, expires
 }
 
-// Withdraw takes the code off offer without pairing anything.
-func (d *DeviceRegistry) Withdraw() {
+// Withdraw takes door's code off offer without pairing anything. The other
+// doors' codes stand.
+func (d *DeviceRegistry) Withdraw(door string) {
 	d.mu.Lock()
-	d.pending = pairingOffer{}
+	delete(d.offers, door)
 	d.mu.Unlock()
 }
 
-// OfferExpires reports when the code on offer lapses, if one is.
-func (d *DeviceRegistry) OfferExpires() (time.Time, bool) {
+// OfferExpires reports when door's code on offer lapses, if one is.
+func (d *DeviceRegistry) OfferExpires(door string) (time.Time, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if !d.offerLiveLocked() {
+	offer, live := d.offerLiveLocked(door)
+	if !live {
 		return time.Time{}, false
 	}
-	return d.pending.expires, true
+	return offer.expires, true
 }
 
-func (d *DeviceRegistry) offerLiveLocked() bool {
-	return d.pending.digest != [sha256.Size]byte{} && d.now().Before(d.pending.expires)
+// offerLiveLocked hands door's offer back when it is worth anything; an
+// expired one is dropped on the way out.
+func (d *DeviceRegistry) offerLiveLocked(door string) (pairingOffer, bool) {
+	offer, ok := d.offers[door]
+	if !ok {
+		return pairingOffer{}, false
+	}
+	if offer.digest == [sha256.Size]byte{} || !d.now().Before(offer.expires) {
+		delete(d.offers, door)
+		return pairingOffer{}, false
+	}
+	return offer, true
 }
 
-// Redeem spends the code on offer for a device credential. A code pairs once:
+// Redeem spends door's code for a device credential. A code pairs once:
 // whoever presents it first is the device, and the offer is gone either way.
-func (d *DeviceRegistry) Redeem(code, name string) (credential string, view DeviceView, err error) {
+// A code minted for another door is refused by name — this door does not
+// answer for it.
+func (d *DeviceRegistry) Redeem(door, code, name string) (credential string, view DeviceView, err error) {
 	sum := sha256.Sum256([]byte(code))
 	d.mu.Lock()
-	if code == "" || !d.offerLiveLocked() || subtle.ConstantTimeCompare(sum[:], d.pending.digest[:]) != 1 {
+	offer, live := d.offerLiveLocked(door)
+	if code == "" || !live || subtle.ConstantTimeCompare(sum[:], offer.digest[:]) != 1 {
 		d.mu.Unlock()
 		return "", DeviceView{}, ErrPairingInvalid
 	}
-	d.pending = pairingOffer{}
+	delete(d.offers, door)
 	credential = randomSecret()
 	now := d.now()
 	dev := &pairedDevice{
@@ -208,7 +228,7 @@ func (d *DeviceRegistry) RevokeAll() {
 		dev.cut()
 	}
 	d.devices = map[string]*pairedDevice{}
-	d.pending = pairingOffer{}
+	d.offers = map[string]pairingOffer{}
 	d.rev++
 	rev := d.rev
 	d.mu.Unlock()

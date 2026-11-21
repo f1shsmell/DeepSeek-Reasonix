@@ -17,8 +17,8 @@ func TestDeviceTrustSurvivesARestart(t *testing.T) {
 	first := newDeviceRegistryAt(time.Now)
 	first.persist = func(devices []persistedDevice) { _ = saveDeviceTrust(path, devices) }
 
-	code, _ := first.Offer()
-	credential, view, err := first.Redeem(code, "phone")
+	code, _ := first.Offer(testDoor)
+	credential, view, err := first.Redeem(testDoor, code, "phone")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,8 +42,8 @@ func TestUnpairingForgetsTheDeviceOnDisk(t *testing.T) {
 	reg := newDeviceRegistryAt(time.Now)
 	reg.persist = func(devices []persistedDevice) { _ = saveDeviceTrust(path, devices) }
 
-	code, _ := reg.Offer()
-	_, view, err := reg.Redeem(code, "phone")
+	code, _ := reg.Offer(testDoor)
+	_, view, err := reg.Redeem(testDoor, code, "phone")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,8 +58,8 @@ func TestUnpairingForgetsTheDeviceOnDisk(t *testing.T) {
 		t.Fatalf("removing the last device left its file behind (stat err = %v)", err)
 	}
 
-	code, _ = reg.Offer()
-	if _, _, err := reg.Redeem(code, "phone"); err != nil {
+	code, _ = reg.Offer(testDoor)
+	if _, _, err := reg.Redeem(testDoor, code, "phone"); err != nil {
 		t.Fatal(err)
 	}
 	reg.RevokeAll()
@@ -103,8 +103,8 @@ func TestShutdownKeepsTheDevicesCloseForgets(t *testing.T) {
 	share.remember = func() bool { return true }
 	share.registry.persist = func(devices []persistedDevice) { _ = saveDeviceTrust(path, devices) }
 
-	code, _ := share.registry.Offer()
-	credential, _, err := share.registry.Redeem(code, "phone")
+	code, _ := share.registry.Offer(testDoor)
+	credential, _, err := share.registry.Redeem(testDoor, code, "phone")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,8 +140,8 @@ func TestReopeningAShareKeepsThePairedDevices(t *testing.T) {
 	share.addresses = func() []ShareAddress { return []ShareAddress{{Interface: "lo", IP: "127.0.0.1", Kind: AddressLAN}} }
 	t.Cleanup(share.Close)
 
-	code, _ := share.registry.Offer()
-	credential, _, err := share.registry.Redeem(code, "phone")
+	code, _ := share.registry.Offer(testDoor)
+	credential, _, err := share.registry.Redeem(testDoor, code, "phone")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,8 +164,8 @@ func TestWithoutTheSwitchShutdownStillForgets(t *testing.T) {
 	share := NewDeviceShare(nil)
 	share.registry.persist = func(devices []persistedDevice) { _ = saveDeviceTrust(path, devices) }
 
-	code, _ := share.registry.Offer()
-	if _, _, err := share.registry.Redeem(code, "phone"); err != nil {
+	code, _ := share.registry.Offer(testDoor)
+	if _, _, err := share.registry.Redeem(testDoor, code, "phone"); err != nil {
 		t.Fatal(err)
 	}
 	share.Shutdown()

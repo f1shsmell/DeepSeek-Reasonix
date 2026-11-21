@@ -75,7 +75,7 @@ func NewDeviceGate(next http.Handler, opts DeviceGateOptions) http.Handler {
 			return
 		}
 		if r.URL.Path == PairPath {
-			pairDevice(w, r, reg, secure)
+			pairDevice(w, r, reg, secure, origin)
 			return
 		}
 		if c, err := r.Cookie(DeviceCookie); err == nil {
@@ -153,9 +153,10 @@ func devicePublicPath(r *http.Request, page fs.FS) bool {
 	return err == nil && !st.IsDir()
 }
 
-// pairDevice spends a pairing code. The code rides a JSON body rather than the
-// URL, so it never reaches a request line, a log or a referrer.
-func pairDevice(w http.ResponseWriter, r *http.Request, reg *DeviceRegistry, secure bool) {
+// pairDevice spends a pairing code minted for the door this gate answers
+// for. The code rides a JSON body rather than the URL, so it never reaches a
+// request line, a log or a referrer.
+func pairDevice(w http.ResponseWriter, r *http.Request, reg *DeviceRegistry, secure bool, door string) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodPost {
 		refuse(w, http.StatusMethodNotAllowed, "request.method_not_allowed", "that method is not accepted here", nil)
@@ -178,7 +179,7 @@ func pairDevice(w http.ResponseWriter, r *http.Request, reg *DeviceRegistry, sec
 		badBody(w)
 		return
 	}
-	credential, view, err := reg.Redeem(body.Code, r.UserAgent())
+	credential, view, err := reg.Redeem(door, body.Code, r.UserAgent())
 	if err != nil {
 		refuse(w, http.StatusForbidden, codeDevicePairing, "that pairing code is not valid; show a new one and scan again", nil)
 		return

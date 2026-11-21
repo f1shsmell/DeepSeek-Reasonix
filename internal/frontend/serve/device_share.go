@@ -322,11 +322,11 @@ func (s *DeviceShare) Offer() (ShareOffer, error) {
 	if live == nil {
 		return ShareOffer{}, ErrShareClosed
 	}
-	code, expires := s.registry.Offer()
+	code, expires := s.registry.Offer(live.origin)
 	link := live.origin + "/#pair=" + code
 	svg, err := QRSVG(link)
 	if err != nil {
-		s.registry.Withdraw()
+		s.registry.Withdraw(live.origin)
 		return ShareOffer{}, err
 	}
 	return ShareOffer{URL: link, QR: svg, Expires: expires}, nil
@@ -391,9 +391,9 @@ func (s *DeviceShare) Status() ShareStatus {
 	}
 	if live != nil {
 		st.Open, st.Origin = true, live.origin
-	}
-	if exp, ok := s.registry.OfferExpires(); ok {
-		st.OfferExpires = &exp
+		if exp, ok := s.registry.OfferExpires(live.origin); ok {
+			st.OfferExpires = &exp
+		}
 	}
 	return st
 }

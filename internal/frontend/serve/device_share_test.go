@@ -15,20 +15,24 @@ import (
 	"reasonix/internal/base/testenv"
 )
 
+// testDoor is the door registry tests mint codes for: any origin spelling
+// with an explicit port, since a gate's origin always names one.
+const testDoor = "http://192.168.1.20:41234"
+
 func TestPairingCodePairsOnce(t *testing.T) {
 	reg := NewDeviceRegistry()
-	code, _ := reg.Offer()
-	cred, view, err := reg.Redeem(code, "Mozilla/5.0 (iPhone)")
+	code, _ := reg.Offer(testDoor)
+	cred, view, err := reg.Redeem(testDoor, code, "Mozilla/5.0 (iPhone)")
 	if err != nil {
 		t.Fatalf("first redeem: %v", err)
 	}
 	if id, ok := reg.Authenticate(cred); !ok || id != view.ID {
 		t.Fatalf("Authenticate = %q %v, want %q", id, ok, view.ID)
 	}
-	if _, _, err := reg.Redeem(code, "second"); !errors.Is(err, ErrPairingInvalid) {
+	if _, _, err := reg.Redeem(testDoor, code, "second"); !errors.Is(err, ErrPairingInvalid) {
 		t.Fatalf("second redeem err = %v, want ErrPairingInvalid", err)
 	}
-	if _, ok := reg.OfferExpires(); ok {
+	if _, ok := reg.OfferExpires(testDoor); ok {
 		t.Fatal("a spent code is still on offer")
 	}
 }
@@ -36,22 +40,75 @@ func TestPairingCodePairsOnce(t *testing.T) {
 func TestPairingCodeLapses(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	reg := newDeviceRegistryAt(func() time.Time { return now })
-	code, _ := reg.Offer()
+	code, _ := reg.Offer(testDoor)
 	now = now.Add(pairingTTL)
-	if _, _, err := reg.Redeem(code, ""); !errors.Is(err, ErrPairingInvalid) {
+	if _, _, err := reg.Redeem(testDoor, code, ""); !errors.Is(err, ErrPairingInvalid) {
 		t.Fatalf("redeem at expiry err = %v, want ErrPairingInvalid", err)
 	}
 }
 
 func TestANewOfferRetiresTheOldCode(t *testing.T) {
 	reg := NewDeviceRegistry()
-	old, _ := reg.Offer()
-	fresh, _ := reg.Offer()
-	if _, _, err := reg.Redeem(old, ""); !errors.Is(err, ErrPairingInvalid) {
+	old, _ := reg.Offer(testDoor)
+	fresh, _ := reg.Offer(testDoor)
+	if _, _, err := reg.Redeem(testDoor, old, ""); !errors.Is(err, ErrPairingInvalid) {
 		t.Fatalf("superseded code err = %v, want ErrPairingInvalid", err)
 	}
-	if _, _, err := reg.Redeem(fresh, ""); err != nil {
+	if _, _, err := reg.Redeem(testDoor, fresh, ""); err != nil {
 		t.Fatalf("current code: %v", err)
+	}
+}
+
+func TestADoorSpendsOnlyItsOwnCode(t *testing.T) {
+	reg := NewDeviceRegistry()
+	code, _ := reg.Offer(testDoor)
+	other := "http://192.168.1.21:41234"
+	if _, _, err := reg.Redeem(other, code, ""); !errors.Is(err, ErrPairingInvalid) {
+		t.Fatalf("a LAN code redeemed at another door err = %v, want ErrPairingInvalid", err)
+	}
+	if _, ok := reg.OfferExpires(testDoor); !ok {
+		t.Fatal("the refused spend consumed the code it was not named for")
+	}
+	if _, _, err := reg.Redeem(testDoor, code, ""); err != nil {
+		t.Fatalf("the code still answers at its own door: %v", err)
+	}
+}
+
+func TestEachDoorHoldsItsOwnCode(t *testing.T) {
+	reg := NewDeviceRegistry()
+	lan := "http://192.168.1.20:41234"
+	net := "http://192.168.1.21:41234"
+	lanCode, _ := reg.Offer(lan)
+	netCode, _ := reg.Offer(net)
+	if lanCode == netCode {
+		t.Fatal("two doors were dealt one code")
+	}
+	if _, _, err := reg.Redeem(net, netCode, "phone"); err != nil {
+		t.Fatalf("the second door's own code: %v", err)
+	}
+	if _, ok := reg.OfferExpires(lan); !ok {
+		t.Fatal("one door's spend consumed the other's offer")
+	}
+	if _, _, err := reg.Redeem(lan, lanCode, "phone"); err != nil {
+		t.Fatalf("the first door's code after the second spent: %v", err)
+	}
+}
+
+func TestWithdrawTakesOneDoorsCodeOnly(t *testing.T) {
+	reg := NewDeviceRegistry()
+	lan := "http://192.168.1.20:41234"
+	net := "http://192.168.1.21:41234"
+	reg.Offer(lan)
+	netCode, _ := reg.Offer(net)
+	reg.Withdraw(lan)
+	if _, ok := reg.OfferExpires(lan); ok {
+		t.Fatal("a withdrawn door still offers a code")
+	}
+	if _, ok := reg.OfferExpires(net); !ok {
+		t.Fatal("withdrawing one door consumed the other's offer")
+	}
+	if _, _, err := reg.Redeem(net, netCode, "phone"); err != nil {
+		t.Fatalf("the untouched door's code: %v", err)
 	}
 }
 
