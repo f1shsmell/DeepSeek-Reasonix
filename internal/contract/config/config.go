@@ -689,6 +689,11 @@ type ServeConfig struct {
 	// reopens the share where it was and adopts the devices that paired against it.
 	// Off by default, like every other promise about a device you are not holding.
 	RememberPairedDevices bool `toml:"remember_paired_devices"`
+	// SharePublicOrigin names the reverse proxy in front of this Studio: the
+	// https address phones dial from anywhere. Naming one opens the proxy's
+	// door on loopback beside the phone's, and a pairing code minted for that
+	// door names the proxy, never the loopback address it dials.
+	SharePublicOrigin string `toml:"share_public_origin"`
 }
 
 // NetworkConfig controls ordinary outbound HTTP traffic such as model providers,
