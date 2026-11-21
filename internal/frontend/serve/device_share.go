@@ -33,6 +33,12 @@ var ErrShareUnattached = errors.New("sharing has nothing to serve yet")
 // encrypted end to end, which makes it the one routed network worth offering.
 var tailnetPrefix = netip.MustParsePrefix("100.64.0.0/10")
 
+// publicDoorIP is the loopback address the named reverse proxy dials: the
+// proxy runs here and reaches the same port the phones' doors answer on. No
+// phone dials it, so it never sits in the picker; only a named proxy brings
+// it up.
+const publicDoorIP = "127.0.0.1"
+
 // DeviceShare is a window's second door: a listener on a private address that
 // paired devices reach the window's hub through, behind a device gate. It is
 // shut until the person at the window opens it, and shutting it unpairs every
@@ -61,6 +67,14 @@ type DeviceShare struct {
 	cloudPhones     CloudPhones
 	port            int
 	persistPort     func(int) error
+	// publicOrigin names the reverse proxy in front of this Studio. It is read
+	// when a door opens and when a code is minted, never remembered into a
+	// standing door: moving a door phones are using belongs to the person at
+	// the window, not to a setting about the next one.
+	publicOrigin func() string
+	// publicDoorErr is why the proxy's door could not bind, said rather than
+	// hidden: a name standing on no door is worse than no name.
+	publicDoorErr string
 	// persistState records whether the share is open and on what address, so the
 	// next process can reopen it. Nil leaves the share in memory only, which is
 	// what every test builds.
@@ -104,19 +118,25 @@ const (
 	// AddressVirtual is anything else: a VPN or proxy tunnel, a VM switch.
 	// Listed, because it may be what someone wants, but never the default.
 	AddressVirtual AddressKind = "virtual"
+	// AddressLoopback is the proxy's own door: bound for a named reverse
+	// proxy on this machine, and never offered as an address to share.
+	AddressLoopback AddressKind = "loopback"
 )
 
 var addressRank = map[AddressKind]int{AddressLAN: 0, AddressTailnet: 1, AddressVirtual: 2}
 
 // ShareStatus is the whole state a window draws its sharing panel from.
 type ShareStatus struct {
-	Open         bool                  `json:"open"`
-	Port         int                   `json:"port,omitempty"`
-	Doors        []ShareDoor           `json:"doors"`
-	Addresses    []ShareAddress        `json:"addresses"`
-	Devices      []DeviceView          `json:"devices"`
-	CloudDevices []CloudControllerView `json:"cloudDevices"`
-	CloudRemote  CloudRemoteStatus     `json:"cloudRemote"`
+	Open bool `json:"open"`
+	Port int  `json:"port,omitempty"`
+	// PublicDoorError is why the proxy's door did not open, when a public
+	// name stands and its door could not bind.
+	PublicDoorError string                `json:"publicDoorError,omitempty"`
+	Doors           []ShareDoor           `json:"doors"`
+	Addresses       []ShareAddress        `json:"addresses"`
+	Devices         []DeviceView          `json:"devices"`
+	CloudDevices    []CloudControllerView `json:"cloudDevices"`
+	CloudRemote     CloudRemoteStatus     `json:"cloudRemote"`
 }
 
 // ShareDoor is one address the share answers on: the adapter a phone dials,
@@ -187,11 +207,64 @@ func (s *DeviceShare) Attach(h http.Handler) {
 // Open answers on ip, one of the addresses Status lists, on the port the doors
 // already share or the configured one. Opening an address that already answers
 // is a settled no-op; the phones already paired stay paired either way, so
-// reopening — after a restart, say — does not ask for a new code.
+// reopening — after a restart, say — does not ask for a new code. A named
+// reverse proxy brings its own door up beside the one asked for.
 func (s *DeviceShare) Open(ip string) (ShareStatus, error) {
 	if !slices.ContainsFunc(s.addresses(), func(a ShareAddress) bool { return a.IP == ip }) {
 		return s.Status(), ErrShareAddress
 	}
+	st, err := s.openDoor(ip)
+	if err == nil {
+		s.ensurePublicDoor()
+	}
+	return st, err
+}
+
+// SetPublicOrigin wires where the proxy's name is read from.
+func (s *DeviceShare) SetPublicOrigin(get func() string) {
+	s.mu.Lock()
+	s.publicOrigin = get
+	s.mu.Unlock()
+}
+
+// publicName reads the proxy's name under the lock.
+func (s *DeviceShare) publicName() string {
+	s.mu.Lock()
+	get := s.publicOrigin
+	s.mu.Unlock()
+	if get == nil {
+		return ""
+	}
+	return strings.TrimSpace(get())
+}
+
+// ensurePublicDoor brings the proxy's door up when a public name stands. The
+// proxy dials loopback from here — loopback is the one address this machine
+// keeps whatever network it joins — and a binding failure is said rather than
+// left standing as a name on no door.
+func (s *DeviceShare) ensurePublicDoor() {
+	if s.publicName() == "" {
+		s.mu.Lock()
+		s.publicDoorErr = ""
+		s.mu.Unlock()
+		return
+	}
+	if _, err := s.openDoor(publicDoorIP); err != nil {
+		s.mu.Lock()
+		s.publicDoorErr = err.Error()
+		s.mu.Unlock()
+		slog.Warn("serve: the public origin's door did not open", "err", err)
+		return
+	}
+	s.mu.Lock()
+	s.publicDoorErr = ""
+	s.mu.Unlock()
+}
+
+// openDoor binds ip and stands a door on it. The turn is the caller's to take:
+// Open and ensurePublicDoor each arrive holding nothing, CloseAddress
+// arrives holding it and never opens.
+func (s *DeviceShare) openDoor(ip string) (ShareStatus, error) {
 	s.turn.Lock()
 	defer s.turn.Unlock()
 	handler := s.attachedHandler()
@@ -204,7 +277,12 @@ func (s *DeviceShare) Open(ip string) (ShareStatus, error) {
 		return s.Status(), nil
 	}
 	port := s.doorPortLocked()
+	get := s.publicOrigin
 	s.mu.Unlock()
+	name := ""
+	if get != nil {
+		name = strings.TrimSpace(get())
+	}
 	ln, err := net.Listen("tcp", net.JoinHostPort(ip, port))
 	if err != nil {
 		if addrInUse(err) {
@@ -216,7 +294,13 @@ func (s *DeviceShare) Open(ip string) (ShareStatus, error) {
 	origin := "http://" + ln.Addr().String()
 	ctx, stop := context.WithCancel(context.Background())
 	door := &shareListener{ip: ip, origin: origin, port: bound, stop: stop, done: make(chan struct{})}
-	gate := NewDeviceGate(handler, DeviceGateOptions{Registry: s.registry, Origin: origin, Page: s.page, Machine: machineName()})
+	// The public name is the loopback door's alone: it names the proxy that
+	// dials this door, and no other door answers for it.
+	doorPublic := ""
+	if ip == publicDoorIP {
+		doorPublic = name
+	}
+	gate := NewDeviceGate(handler, DeviceGateOptions{Registry: s.registry, Origin: origin, Page: s.page, Machine: machineName(), PublicOrigin: doorPublic})
 	s.mu.Lock()
 	if s.doors == nil {
 		s.doors = map[string]*shareListener{}
@@ -390,7 +474,8 @@ func (s *DeviceShare) stopListeningLocked() {
 }
 
 // Offer mints a pairing code for one door. The code is spent at the address
-// it names, so each door's code names that door.
+// it names, so each door's code names that door — and the proxy's door names
+// the public address, never the loopback one behind it.
 func (s *DeviceShare) Offer(ip string) (ShareOffer, error) {
 	s.mu.Lock()
 	door := s.doors[ip]
@@ -400,6 +485,11 @@ func (s *DeviceShare) Offer(ip string) (ShareOffer, error) {
 	}
 	code, expires := s.registry.Offer(door.origin)
 	link := door.origin + "/#pair=" + code
+	if ip == publicDoorIP {
+		if name := s.publicName(); name != "" {
+			link = name + "/#pair=" + code
+		}
+	}
 	svg, err := QRSVG(link)
 	if err != nil {
 		s.registry.Withdraw(door.origin)
@@ -464,8 +554,9 @@ func (s *DeviceShare) Status() ShareStatus {
 	for ip, door := range s.doors {
 		doors[ip] = door
 	}
+	publicDoorErr := s.publicDoorErr
 	s.mu.Unlock()
-	st := ShareStatus{Port: port, Addresses: s.addresses(), Devices: s.registry.Devices(), CloudDevices: s.cloud.views()}
+	st := ShareStatus{Port: port, Addresses: s.addresses(), Devices: s.registry.Devices(), CloudDevices: s.cloud.views(), PublicDoorError: publicDoorErr}
 	if cloudStatus != nil {
 		st.CloudRemote = cloudStatus()
 	}
@@ -480,6 +571,9 @@ func (s *DeviceShare) Status() ShareStatus {
 			entry := ShareDoor{Address: ip, Origin: door.origin}
 			if a, ok := byIP[ip]; ok {
 				entry.Interface, entry.Kind = a.Interface, a.Kind
+			}
+			if ip == publicDoorIP {
+				entry.Kind = AddressLoopback
 			}
 			if exp, ok := s.registry.OfferExpires(door.origin); ok {
 				entry.OfferExpires = &exp

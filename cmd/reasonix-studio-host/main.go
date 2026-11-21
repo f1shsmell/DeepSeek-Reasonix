@@ -422,6 +422,13 @@ func assemble(ctx context.Context, logs, handshakeTo io.Writer, shell shellIdent
 	// with the rest of the kernel, keeping the phones this machine already adopted.
 	share := serve.NewDeviceShare(page)
 	share.RestorePort(cfg.SharePort())
+	share.SetPublicOrigin(func() string {
+		loaded, err := config.Load()
+		if err != nil {
+			return ""
+		}
+		return loaded.SharePublicOrigin()
+	})
 	go func() {
 		<-ctx.Done()
 		share.Shutdown()

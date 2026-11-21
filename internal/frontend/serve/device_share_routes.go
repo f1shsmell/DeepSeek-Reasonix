@@ -17,6 +17,7 @@ const (
 	codeSharePortInUse    = "share.port_in_use"
 	codeSharePortRange    = "share.port_out_of_range"
 	codeSharePortSave     = "share.port_save_failed"
+	codeSharePublicSave   = "share.public_origin_save_failed"
 	codeShareRememberSave = "share.remember_save_failed"
 	codeShareUnknown      = "share.device_unknown"
 )
@@ -31,6 +32,7 @@ func (h *Hub) registerShareRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /share", h.shareStatus)
 	mux.HandleFunc("POST /share/open", h.shareOpen)
 	mux.HandleFunc("POST /share/port", h.shareSetPort)
+	mux.HandleFunc("POST /share/public-origin", h.shareSetPublicOrigin)
 	mux.HandleFunc("POST /share/close", h.shareClose)
 	mux.HandleFunc("POST /share/offer", h.shareOffer)
 	mux.HandleFunc("POST /share/cloud-offer", h.shareCloudOffer)
@@ -117,6 +119,22 @@ func (h *Hub) shareRememberSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, struct {
 			Remember bool `json:"remember"`
 		}{Remember: *body.Remember})
+	}
+}
+
+func (h *Hub) shareSetPublicOrigin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Origin string `json:"origin"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body); err != nil {
+		badBody(w)
+		return
+	}
+	switch err := h.opts.Share.SetPublicOriginSetting(strings.TrimSpace(body.Origin)); {
+	case err != nil:
+		refuse(w, http.StatusBadRequest, codeSharePublicSave, err.Error(), nil)
+	default:
+		writeJSON(w, h.opts.Share.Status())
 	}
 }
 
