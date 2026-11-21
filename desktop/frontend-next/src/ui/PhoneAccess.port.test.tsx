@@ -4,6 +4,7 @@ import { cleanup, render, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import "./testkit";
 import { keepLiveOffers, PhoneAccess } from "./PhoneAccess";
+import type { HubPort } from "../port/hub";
 import type { ShareOffer, ShareStatus } from "../port/share";
 
 afterEach(cleanup);
@@ -23,10 +24,18 @@ function rig(initial: ShareStatus) {
       return st;
     }),
     offerShare: vi.fn(async (ip: string) => ({ url: `http://${ip}/#pair=x`, qr: "<svg/>", expires: new Date(Date.now() + 60_000).toISOString() })),
+    setSharePublicOrigin: vi.fn(async (origin: string) => (st = { ...st, publicOrigin: origin.trim() || undefined })),
     shareRemember: vi.fn(async () => ({ remember: false })),
   };
   return { hub, ui: <PhoneAccess hub={hub as unknown as HubPort} onError={() => {}} /> };
 }
+
+const originField = () =>
+  waitFor(() => {
+    const el = document.querySelector<HTMLInputElement>('[data-action="share.public-origin"]');
+    expect(el).not.toBeNull();
+    return el!;
+  });
 
 const portField = () =>
   waitFor(() => {
@@ -98,4 +107,18 @@ it("keeps a picture whose door still holds its clock", () => {
 it("keeps nothing when no door stands", () => {
   const kept = keepLiveOffers({ "10.0.0.2": offer("10.0.0.2") }, base);
   expect(kept).toEqual({});
+});
+
+// The proxy's name is saved as typed, and a blur that changed nothing asks
+// for nothing: the setting lands with the doors opened next.
+it("saves the reverse proxy name on blur and leaves an unchanged blur alone", async () => {
+  const { hub, ui } = rig(base);
+  render(ui);
+  const field = await originField();
+  await userEvent.type(field, "https://studio.example.com");
+  await userEvent.tab();
+  await waitFor(() => expect(hub.setSharePublicOrigin).toHaveBeenCalledWith("https://studio.example.com"));
+  await userEvent.click(field);
+  await userEvent.tab();
+  expect(hub.setSharePublicOrigin).toHaveBeenCalledTimes(1);
 });

@@ -167,6 +167,11 @@ export function useShare(hub: HubPort, onError: (e: unknown) => void, watch = tr
     (port: number) => run(async () => setSt(await hub.setSharePort(port))),
     [hub, run],
   );
+  // The proxy's name lands with the doors opened next; no standing door moves.
+  const saveOrigin = useCallback(
+    (origin: string) => run(async () => setSt(await hub.setSharePublicOrigin(origin))),
+    [hub, run],
+  );
 
   const newCode = useCallback((ip: string) => run(() => mint(ip)), [run, mint]);
   const newCloudCode = useCallback(
@@ -176,14 +181,15 @@ export function useShare(hub: HubPort, onError: (e: unknown) => void, watch = tr
 
   const revoke = (id: string) => run(async () => setSt(await hub.revokeDevice(id)));
 
-  return { st, offers, savePort, cloudOffer, busy, confirm, setConfirm, newCode, newCloudCode, toggle, toggleAddress, revoke, remember, saveRemember, refresh: read };
+  return { st, offers, savePort, saveOrigin, cloudOffer, busy, confirm, setConfirm, newCode, newCloudCode, toggle, toggleAddress, revoke, remember, saveRemember, refresh: read };
 }
 
 /** The switch, the doors, each door's code, and the paired phones. */
 export function ShareBody({ share }: { share: Share }) {
-  const { st, offers, savePort, busy, confirm, setConfirm, newCode, toggle, toggleAddress, revoke, remember, saveRemember } = share;
+  const { st, offers, savePort, saveOrigin, busy, confirm, setConfirm, newCode, toggle, toggleAddress, revoke, remember, saveRemember } = share;
   const [copied, setCopied] = useState<"" | "done" | "failed">("");
   const [portDraft, setPortDraft] = useState<string | null>(null);
+  const [originDraft, setOriginDraft] = useState<string | null>(null);
   if (!st) return null;
   // The link the code draws, for a device that cannot scan: the same
   // one-time credential, so it is copied on request and never shown as text.
@@ -198,6 +204,12 @@ export function ShareBody({ share }: { share: Share }) {
     const next = portDraft === "" ? 0 : Number(portDraft);
     setPortDraft(null);
     if (next !== (st.port ?? 0)) void savePort(next);
+  };
+  const commitOrigin = () => {
+    if (originDraft === null) return;
+    const next = originDraft.trim();
+    setOriginDraft(null);
+    if (next !== (st.publicOrigin ?? "")) void saveOrigin(next);
   };
 
   return (
@@ -265,6 +277,35 @@ export function ShareBody({ share }: { share: Share }) {
             );
           })}
           {st.open && <p className="rmthint">{t("remote.turning_a_network_off_stops_only")}</p>}
+          {st.publicOrigin && (() => {
+            const door = st.doors.find((d) => d.kind === "loopback");
+            const offer = door ? offers[door.address] : undefined;
+            return (
+              <div className="sharedoor" data-on={door ? "" : undefined}>
+                <div className="sharedoorhd">
+                  <span className="lb" title={st.publicOrigin}>{st.publicOrigin} · {t("remote.via_proxy")}</span>
+                </div>
+                {door &&
+                  (offer ? (
+                    <div className="shareqr">
+                      <img src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(offer.qr)}`} alt={t("remote.pairing_qr_code")} width={184} height={184} />
+                      <div className="sharehow">
+                        <span className="lb">{t("remote.scan_with_your_phones_camera")}</span>
+                        <span className="ds">{t("remote.the_code_pairs_one_phone", { time: clock(offer.expires) })}</span>
+                        <code dir="ltr">{st.publicOrigin}</code>
+                        <button className="rmtlnk sharecopy" data-action="share.copy" data-target={door.address} onClick={() => void copyLink(offer.url)}>
+                          {copied === "done" ? t("common.copied") : copied === "failed" ? t("remote.copy_blocked") : t("remote.copy_pairing_link")}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button className="rmtadd" data-action="share.offer" data-target={door.address} disabled={busy} onClick={() => void newCode(door.address)}>
+                      {t("remote.show_a_pairing_code")}
+                    </button>
+                  ))}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -284,6 +325,23 @@ export function ShareBody({ share }: { share: Share }) {
       <p className="rmthint">
         {t("remote.leave_empty_to_let_the")}
       </p>
+
+      <label className="rmtf">
+        <span>{t("remote.reverse_proxy_name")}</span>
+        <input
+          data-action="share.public-origin"
+          type="text"
+          value={originDraft ?? st.publicOrigin ?? ""}
+          placeholder="https://studio.example.com"
+          disabled={busy}
+          onChange={(e) => setOriginDraft(e.target.value)}
+          onBlur={commitOrigin}
+        />
+      </label>
+      <p className="rmthint">{t("remote.reverse_proxy_hint")}</p>
+      {st.publicDoorError && (
+        <p className="rmthint" role="alert" data-s="bad">{st.publicDoorError}</p>
+      )}
 
       {st.open && st.devices.length > 0 && (
         <div className="sharedevs">

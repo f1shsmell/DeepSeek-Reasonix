@@ -4,7 +4,7 @@
 
 // lan is Wi-Fi or Ethernet; virtual is a VPN or proxy tunnel a phone usually
 // cannot reach. The kernel lists them in that order, so the first is the default.
-export type AddressKind = "lan" | "tailnet" | "virtual";
+export type AddressKind = "lan" | "tailnet" | "virtual" | "loopback";
 
 export interface ShareAddress {
   interface: string;
@@ -59,6 +59,10 @@ export interface ShareStatus {
   open: boolean;
   // The fixed port the user chose; absent means the system picks one each time.
   port?: number;
+  // The reverse proxy's name as it stands now; absent when none is named.
+  publicOrigin?: string;
+  // Why the proxy's door could not open, when a name stands and it failed.
+  publicDoorError?: string;
   // The addresses currently answering, in the order they opened. A share may
   // answer on more than one; every door holds its own pairing code.
   doors: ShareDoor[];
@@ -112,6 +116,9 @@ export interface SharePort {
   closeShare(ip?: string): Promise<ShareStatus>;
   // Zero clears the choice. Used by the doors opened next.
   setSharePort(port: number): Promise<ShareStatus>;
+  // Names the reverse proxy in front of this Studio; empty clears it. The
+  // name lands with the doors opened next.
+  setSharePublicOrigin(origin: string): Promise<ShareStatus>;
   // Whether this install keeps the phones that paired across restarts. Null
   // where the reading failed: the share routes exist only on a window's kernel.
   shareRemember(): Promise<{ remember: boolean } | null>;

@@ -7,6 +7,7 @@ import type { CloudDevice, CloudRemoteStatus, PairedDevice } from "../port/share
 import { copyText } from "./CopyButton";
 import { useDismiss } from "./dismiss";
 import { addressLabel, clock, deviceLabel, type Share, useShare } from "./PhoneAccess";
+import type { ShareDoor } from "../port/share";
 import { Switch } from "./Switch";
 import { TooltipButton } from "./TooltipButton";
 
@@ -165,9 +166,10 @@ function PhoneCard({ share, failure }: { share: Share; failure: string }) {
   useEffect(() => () => { if (arm.current !== null) window.clearTimeout(arm.current); }, []);
   if (!st) return null;
   const noNetwork = st.addresses.length === 0;
-  const doorLabel = (address: string) => {
-    const a = st.addresses.find((x) => x.ip === address);
-    return a ? addressLabel(a) : address;
+  const doorLabel = (door: ShareDoor) => {
+    if (door.kind === "loopback") return `${st.publicOrigin ?? door.address} · ${t("remote.via_proxy")}`;
+    const a = st.addresses.find((x) => x.ip === door.address);
+    return a ? addressLabel(a) : door.address;
   };
 
   const copy = (url: string) =>
@@ -258,7 +260,7 @@ function PhoneCard({ share, failure }: { share: Share; failure: string }) {
             <div className="pc-code" key={door.address}>
               <img src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(offer.qr)}`} alt={t("remote.pairing_qr_code")} width={148} height={148} />
               <span className="pc-side">
-                <span className="pc-when">{doorLabel(door.address)}</span>
+                <span className="pc-when">{doorLabel(door)}</span>
                 <span className="pc-when">{t("remote.local_pairing_valid_until_time", { time: clock(offer.expires) })}</span>
                 <span className="pc-acts">
                   <button data-action="share.copy" onClick={() => void copy(offer.url)}>{copied ? t("common.copied") : t("remote.copy_link")}</button>

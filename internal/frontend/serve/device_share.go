@@ -131,12 +131,15 @@ type ShareStatus struct {
 	Port int  `json:"port,omitempty"`
 	// PublicDoorError is why the proxy's door did not open, when a public
 	// name stands and its door could not bind.
-	PublicDoorError string                `json:"publicDoorError,omitempty"`
-	Doors           []ShareDoor           `json:"doors"`
-	Addresses       []ShareAddress        `json:"addresses"`
-	Devices         []DeviceView          `json:"devices"`
-	CloudDevices    []CloudControllerView `json:"cloudDevices"`
-	CloudRemote     CloudRemoteStatus     `json:"cloudRemote"`
+	PublicDoorError string `json:"publicDoorError,omitempty"`
+	// PublicOrigin is the reverse proxy's name as it stands now: what the
+	// panel shows beside the doors it opened.
+	PublicOrigin string                `json:"publicOrigin,omitempty"`
+	Doors        []ShareDoor           `json:"doors"`
+	Addresses    []ShareAddress        `json:"addresses"`
+	Devices      []DeviceView          `json:"devices"`
+	CloudDevices []CloudControllerView `json:"cloudDevices"`
+	CloudRemote  CloudRemoteStatus     `json:"cloudRemote"`
 }
 
 // ShareDoor is one address the share answers on: the adapter a phone dials,
@@ -556,7 +559,7 @@ func (s *DeviceShare) Status() ShareStatus {
 	}
 	publicDoorErr := s.publicDoorErr
 	s.mu.Unlock()
-	st := ShareStatus{Port: port, Addresses: s.addresses(), Devices: s.registry.Devices(), CloudDevices: s.cloud.views(), PublicDoorError: publicDoorErr}
+	st := ShareStatus{Port: port, Addresses: s.addresses(), Devices: s.registry.Devices(), CloudDevices: s.cloud.views(), PublicDoorError: publicDoorErr, PublicOrigin: s.publicName()}
 	if cloudStatus != nil {
 		st.CloudRemote = cloudStatus()
 	}

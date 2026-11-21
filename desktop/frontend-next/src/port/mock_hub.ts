@@ -405,6 +405,16 @@ export class MockHub implements HubPort {
     return Promise.resolve({ ...this.share });
   }
 
+  setSharePublicOrigin(origin: string) {
+    const name = origin.trim();
+    const doors = this.share.doors.filter((d) => d.kind !== "loopback");
+    if (name) {
+      doors.push({ address: "127.0.0.1", kind: "loopback", origin: "http://127.0.0.1:41234" });
+    }
+    this.share = { ...this.share, publicOrigin: name || undefined, publicDoorError: undefined, doors };
+    return Promise.resolve({ ...this.share });
+  }
+
   private remember = false;
 
   shareRemember() {
