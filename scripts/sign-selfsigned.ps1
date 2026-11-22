@@ -40,6 +40,7 @@ $script:SigningSubject = 'CN=Reasonix Studio self-built release'
 switch ($Mode) {
     'mint' {
         if ($OutputDirectory -eq '') { throw 'mint needs -OutputDirectory' }
+        New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
         $certificate = New-SelfSignedCertificate `
             -Type CodeSigningCert `
             -Subject $script:SigningSubject `
@@ -52,9 +53,12 @@ switch ($Mode) {
             -CertStoreLocation Cert:\CurrentUser\My
         # A week outlives every job of one release run; shorter cannot sign a
         # second release if a PFX ever leaks out of the runner.
+        #
+        # The PFX travels through .NET here, not through the PKI module: the
+        # runners' PowerShell 7 PKI module carries no PFX cmdlets.
         $passwordPlain = [guid]::NewGuid().ToString('N')
-        $password = ConvertTo-SecureString $passwordPlain -AsPlainText -Force
-        Export-PfxDocument -Cert $certificate -FilePath (Join-Path $OutputDirectory 'release-signing.pfx') -Password $password -NoClobber | Out-Null
+        $pfxBytes = $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx, $passwordPlain)
+        [IO.File]::WriteAllBytes((Join-Path $OutputDirectory 'release-signing.pfx'), $pfxBytes)
         Set-Content -LiteralPath (Join-Path $OutputDirectory 'release-signing.password') -Value $passwordPlain -NoNewline
         Set-Content -LiteralPath (Join-Path $OutputDirectory 'release-signing.thumbprint') -Value $certificate.Thumbprint -NoNewline
         Set-Content -LiteralPath (Join-Path $OutputDirectory 'release-signing.subject') -Value $certificate.Subject -NoNewline
@@ -62,16 +66,21 @@ switch ($Mode) {
     }
     'import' {
         if ($PfxPath -eq '' -or $PasswordFilePath -eq '') { throw 'import needs -PfxPath and -PasswordFilePath' }
-        $password = ConvertTo-SecureString (Get-Content -LiteralPath $PasswordFilePath -Raw) -AsPlainText -Force
+        $passwordPlain = (Get-Content -LiteralPath $PasswordFilePath -Raw).Trim()
+        $pfxBytes = [IO.File]::ReadAllBytes($PfxPath)
         # The runner is ephemeral and administrator: trusting the minted root
         # here is what lets signtool verify call a self-signed chain valid, so
         # the verification scripts read the self-signed release exactly as they
-        # read a CA-signed one.
-        $certificate = Import-PfxDocument -FilePath $PfxPath -Password $password -CertStoreLocation Cert:\CurrentUser\My
-        $cer = Join-Path $env:RUNNER_TEMP 'release-signing.cer'
-        Export-Certificate -Cert $certificate -FilePath $cer | Out-Null
-        Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-        Write-Host "Imported release signing certificate $($certificate.Thumbprint)"
+        # read a CA-signed one. Import through .NET for the same reason the
+        # export above does — no PKI module in the runners' PowerShell 7.
+        $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $pfxBytes, $passwordPlain,
+            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::DefaultKeySet)
+        $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
+        $store.Open('ReadWrite')
+        $store.Add($certificate)
+        $store.Close()
+        Write-Host "Imported and trusted release signing certificate $($certificate.Thumbprint)"
         "thumbprint=$($certificate.Thumbprint)"
         "subject=$($certificate.Subject)"
     }
