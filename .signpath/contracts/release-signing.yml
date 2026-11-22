@@ -5,7 +5,6 @@ repository_url: https://github.com/esengine/DeepSeek-Reasonix.git
 allowed_branch_names:
   - studio
 allowed_build_definitions:
-  - .github/workflows/release-studio.yml
   - .github/workflows/studio-certum-signing-smoke.yml
 fingerprint_files:
   - .github/workflows/release-studio.yml
@@ -13,6 +12,7 @@ fingerprint_files:
   - .github/actions/setup-certum/action.yml
   - scripts/install-smoke.ps1
   - scripts/sign-certum.ps1
+  - scripts/sign-selfsigned.ps1
   - scripts/verify-windows-authenticode.ps1
   - scripts/verify-windows-package.ps1
   - scripts/windows-signing-lib.ps1

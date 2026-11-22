@@ -73,8 +73,8 @@ func TestWindowsSigningLegsRunOneAtATime(t *testing.T) {
 			t.Errorf("%s fail-fast = %q; a failed leg must leave the others to finish so only it reruns", name, got)
 		}
 		group := mappingScalar(mappingValue(job, "concurrency"), "group")
-		if group != "certum-signing" {
-			t.Errorf("%s concurrency group = %q, want certum-signing", name, group)
+		if group != "windows-signing" {
+			t.Errorf("%s concurrency group = %q, want windows-signing", name, group)
 		}
 		if mappingScalar(job, "environment") != "studio-release" {
 			t.Errorf("%s lost its studio-release environment", name)
