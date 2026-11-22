@@ -38,8 +38,9 @@ export type Share = ReturnType<typeof useShare>;
 // is tested without a render.
 export function keepLiveOffers(prev: Record<string, ShareOffer>, st: ShareStatus): Record<string, ShareOffer> {
   const kept: Record<string, ShareOffer> = {};
+  const doors = st.doors ?? [];
   for (const [ip, offer] of Object.entries(prev)) {
-    if (st.doors.some((d) => d.address === ip && d.offerExpires)) kept[ip] = offer;
+    if (doors.some((d) => d.address === ip && d.offerExpires)) kept[ip] = offer;
   }
   return kept;
 }
@@ -58,8 +59,13 @@ export function useShare(hub: HubPort, onError: (e: unknown) => void, watch = tr
   const read = useCallback(
     () =>
       hub.shareStatus().then((now) => {
-        setSt(now);
-        return now;
+        // A closed share's door set can arrive as null (Go marshals an empty
+        // list that way); every reader below treats it as a list. Normalizing
+        // here, at the one place all share readers meet, keeps the card and
+        // the settings block from depending on each caller's care.
+        const settled = now ? { ...now, doors: now.doors ?? [] } : now;
+        setSt(settled);
+        return settled;
       }),
     [hub],
   );

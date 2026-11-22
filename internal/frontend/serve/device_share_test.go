@@ -630,3 +630,17 @@ func TestUnpairingCutsTheStreamADeviceHoldsOpen(t *testing.T) {
 		t.Fatal("the stream outlived the device's pairing")
 	}
 }
+
+// TestAClosedShareListsAnEmptyDoorSet pins the wire shape a closed share
+// answers with: a nil door set marshals as null, and a panel that reads it
+// as a list dies drawing the card. The share owns the empty list.
+func TestAClosedShareListsAnEmptyDoorSet(t *testing.T) {
+	share := NewDeviceShare(nil)
+	raw, err := json.Marshal(share.Status())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"doors":[]`) {
+		t.Fatalf("closed share answered %s, want doors to marshal as an empty list", raw)
+	}
+}
