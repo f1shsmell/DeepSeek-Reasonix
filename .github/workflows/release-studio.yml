@@ -544,6 +544,11 @@ jobs:
           $script:ReleaseSignedPe | ForEach-Object { "app/$_" } | Set-Content signing/signing-files.txt
           Get-Content signing/signing-files.txt
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-signing-certificate
+          path: ${{ runner.temp }}/signing-cert
+
       - name: Trust the release certificate
         shell: pwsh
         run: |
@@ -770,6 +775,11 @@ jobs:
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path dist $entry.Key)).Hash.ToLowerInvariant()
             if ($hash -cne $entry.Value) { throw "$($entry.Key) is not the file windows-verify-package checked" }
           }
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-signing-certificate
+          path: ${{ runner.temp }}/signing-cert
 
       - name: Trust the release certificate
         shell: pwsh
