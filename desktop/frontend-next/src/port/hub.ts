@@ -651,7 +651,9 @@ export class SseHub implements HubPort {
     const res = await fetch("/share", { credentials: "same-origin" });
     if (res.status === 404) return null;
     if (!res.ok) await SseHub.fail("/share", res);
-    return (await res.json()) as ShareStatus;
+    const body = (await res.json()) as ShareStatus;
+    // A closed share's door set marshals as null; the panel reads it as a list.
+    return { ...body, doors: body.doors ?? [] };
   }
 
   openShare(ip: string) {

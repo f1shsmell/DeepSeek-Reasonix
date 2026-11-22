@@ -559,7 +559,7 @@ func (s *DeviceShare) Status() ShareStatus {
 	}
 	publicDoorErr := s.publicDoorErr
 	s.mu.Unlock()
-	st := ShareStatus{Port: port, Addresses: s.addresses(), Devices: s.registry.Devices(), CloudDevices: s.cloud.views(), PublicDoorError: publicDoorErr, PublicOrigin: s.publicName()}
+	st := ShareStatus{Doors: []ShareDoor{}, Port: port, Addresses: s.addresses(), Devices: s.registry.Devices(), CloudDevices: s.cloud.views(), PublicDoorError: publicDoorErr, PublicOrigin: s.publicName()}
 	if cloudStatus != nil {
 		st.CloudRemote = cloudStatus()
 	}
