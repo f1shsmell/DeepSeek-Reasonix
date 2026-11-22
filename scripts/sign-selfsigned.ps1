@@ -68,18 +68,25 @@ switch ($Mode) {
         if ($PfxPath -eq '' -or $PasswordFilePath -eq '') { throw 'import needs -PfxPath and -PasswordFilePath' }
         $passwordPlain = (Get-Content -LiteralPath $PasswordFilePath -Raw).Trim()
         $pfxBytes = [IO.File]::ReadAllBytes($PfxPath)
-        # The runner is ephemeral and administrator: trusting the minted root
-        # here is what lets signtool verify call a self-signed chain valid, so
-        # the verification scripts read the self-signed release exactly as they
-        # read a CA-signed one. Import through .NET for the same reason the
-        # export above does — no PKI module in the runners' PowerShell 7.
+        # Import through .NET because the runners' PowerShell 7 PKI module
+        # carries no PFX cmdlets. Two placements, both needed:
+        #   CurrentUser\My with a persisted key — where signtool /sha1 finds
+        #   the certificate to sign with;
+        #   LocalMachine\Root — trusting the minted root, which is what lets
+        #   signtool verify call a self-signed chain valid, so the verification
+        #   scripts read the self-signed release exactly as they read a
+        #   CA-signed one. The runner is ephemeral and administrator.
         $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
             $pfxBytes, $passwordPlain,
-            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::DefaultKeySet)
-        $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
-        $store.Open('ReadWrite')
-        $store.Add($certificate)
-        $store.Close()
+            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet)
+        $myStore = [System.Security.Cryptography.X509Certificates.X509Store]::new('My', 'CurrentUser')
+        $myStore.Open('ReadWrite')
+        $myStore.Add($certificate)
+        $myStore.Close()
+        $rootStore = [System.Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
+        $rootStore.Open('ReadWrite')
+        $rootStore.Add($certificate)
+        $rootStore.Close()
         Write-Host "Imported and trusted release signing certificate $($certificate.Thumbprint)"
         "thumbprint=$($certificate.Thumbprint)"
         "subject=$($certificate.Subject)"
