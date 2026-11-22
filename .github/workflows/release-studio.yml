@@ -12,12 +12,15 @@ run-name: Release Studio ${{ inputs.tag || github.ref_name }}
 # release carries no root latest.json, because the 1.x updaters' last-resort
 # URL is releases/latest/download/latest.json and must keep answering 404.
 #
-# Windows artifacts are Authenticode-signed with a Certum SimplySign cloud
-# certificate in two stages: every PE file in the application tree, then the
-# installer built around them. Signing only the container leaves them unsigned on disk
-# after installation, which is what reputation heuristics quarantine. The
-# repository variable STUDIO_SIGNING_ENABLED=true turns it on; once on, a
-# release that cannot sign does not publish.
+# Windows artifacts are Authenticode-signed in two stages: every PE file in
+# the application tree, then the installer built around them. Signing only the
+# container leaves them unsigned on disk after installation, which is what
+# reputation heuristics quarantine. The certificate is minted self-signed by
+# the run itself and trusted on the runners that sign and verify — no CA, no
+# secrets: what a signature asserts here is integrity and this-run
+# consistency, not publisher identity, and a fresh install says so. The
+# repository variable STUDIO_SIGNING_ENABLED=true turns signing on; once on,
+# a release that cannot sign does not publish.
 #
 # Windows and macOS both package in two steps because both need something done
 # to the bundle in between — a signature there, notarization here.
@@ -454,9 +457,46 @@ jobs:
   # certum-signing group needs: a group holds one running and one waiting job,
   # so two legs started together would have the waiting one cancelled by the
   # next arrival. A failed leg reruns alone; the others' results are kept.
+  # One certificate per release run, minted before any signing leg starts and
+  # carried to them as an artifact. Everything a signature needs is generated
+  # here; the run holds no secrets and answers to no CA.
+  windows-release-cert:
+    name: mint the release signing certificate
+    needs: [resolve, signing-contract]
+    if: vars.STUDIO_SIGNING_ENABLED == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 10
+    environment: studio-release
+    permissions:
+      contents: read
+    outputs:
+      thumbprint: ${{ steps.mint.outputs.thumbprint }}
+      subject: ${{ steps.mint.outputs.subject }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Mint the release signing certificate
+        id: mint
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/sign-selfsigned.ps1 -Mode mint -OutputDirectory "$env:RUNNER_TEMP/signing-cert"
+          "thumbprint=$(Get-Content -Raw "$env:RUNNER_TEMP/signing-cert/release-signing.thumbprint")" >> $env:GITHUB_OUTPUT
+          "subject=$(Get-Content -Raw "$env:RUNNER_TEMP/signing-cert/release-signing.subject")" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-signing-certificate
+          path: ${{ runner.temp }}/signing-cert/*
+          if-no-files-found: error
+          retention-days: 1
+
   windows-sign-payload:
-    name: sign the Windows PE files (Certum, ${{ matrix.arch }})
-    needs: [resolve, signing-contract, build]
+    name: sign the Windows PE files (self-signed, ${{ matrix.arch }})
+    needs: [resolve, signing-contract, windows-release-cert, build]
     if: vars.STUDIO_SIGNING_ENABLED == 'true'
     runs-on: windows-2022
     timeout-minutes: 30
@@ -469,7 +509,7 @@ jobs:
     permissions:
       contents: read
     concurrency:
-      group: certum-signing
+      group: windows-signing
       cancel-in-progress: false
     # One output per architecture, because matrix legs share a job's output map:
     # a leg writes only its own and an empty value never replaces another's.
@@ -485,36 +525,6 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-
-      # The switch is on, so nothing below may fall back to an unsigned build.
-      # Every missing value is reported under its own code before any fails.
-      - name: Require Certum configuration
-        shell: pwsh
-        env:
-          CERTUM_USERNAME: ${{ secrets.CERTUM_USERNAME }}
-          CERTUM_OTP_URI: ${{ secrets.CERTUM_OTP_URI }}
-          CERTUM_KEY_ID: ${{ secrets.CERTUM_KEY_ID }}
-          EXPECTED_SUBJECT: ${{ vars.STUDIO_SIGNING_SUBJECT }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $failed = $false
-          function Refuse([string]$code, [string]$message) {
-            Write-Output "::error title=$code::$message"
-            Set-Variable -Scope Script -Name failed -Value $true
-          }
-          if ([string]::IsNullOrWhiteSpace($env:CERTUM_USERNAME)) {
-            Refuse 'studio-signing.missing-username' 'Secret CERTUM_USERNAME is not set'
-          }
-          if ($env:CERTUM_OTP_URI -notmatch '^otpauth://totp/') {
-            Refuse 'studio-signing.invalid-otp-uri' 'Secret CERTUM_OTP_URI must be a complete otpauth://totp/ URI'
-          }
-          if ($env:CERTUM_KEY_ID -notmatch '^[0-9a-fA-F]{40}$') {
-            Refuse 'studio-signing.invalid-key-id' 'Secret CERTUM_KEY_ID must be the 40-character SHA-1 certificate thumbprint'
-          }
-          if ([string]::IsNullOrWhiteSpace($env:EXPECTED_SUBJECT)) {
-            Refuse 'studio-signing.subject-unset' 'Variable STUDIO_SIGNING_SUBJECT is empty; run the Studio Certum signing smoke test and copy the subject it reports'
-          }
-          if ($failed) { exit 1 }
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -534,24 +544,19 @@ jobs:
           $script:ReleaseSignedPe | ForEach-Object { "app/$_" } | Set-Content signing/signing-files.txt
           Get-Content signing/signing-files.txt
 
-      - name: Connect to Certum
-        uses: ./.github/actions/setup-certum
-        with:
-          username: ${{ secrets.CERTUM_USERNAME }}
-          otp-uri: ${{ secrets.CERTUM_OTP_URI }}
-          thumbprint: ${{ secrets.CERTUM_KEY_ID }}
+      - name: Trust the release certificate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/sign-selfsigned.ps1 -Mode import `
+            -PfxPath "$env:RUNNER_TEMP/signing-cert/release-signing.pfx" `
+            -PasswordFilePath "$env:RUNNER_TEMP/signing-cert/release-signing.password"
 
       - name: Sign the PE files
         shell: pwsh
         env:
-          CERTUM_KEY_ID: ${{ secrets.CERTUM_KEY_ID }}
-        run: ./scripts/sign-certum.ps1 -PayloadDirectory signing
-
-      # The session signs for any process on the runner while it is up.
-      - name: Disconnect from Certum
-        if: always()
-        shell: pwsh
-        run: Get-Process -Name '*SimplySign*' -ErrorAction SilentlyContinue | Stop-Process -Force
+          SIGN_CERT_THUMBPRINT: ${{ needs.windows-release-cert.outputs.thumbprint }}
+        run: ./scripts/sign-selfsigned.ps1 -Mode sign-payload -PayloadDirectory signing
 
       # Enumerates the tree again rather than reading the list it signed from,
       # so a PE file the list missed fails here unsigned.
@@ -559,15 +564,15 @@ jobs:
         id: verify
         shell: pwsh
         env:
-          CERTUM_KEY_ID: ${{ secrets.CERTUM_KEY_ID }}
-          EXPECTED_SUBJECT: ${{ vars.STUDIO_SIGNING_SUBJECT }}
+          SIGN_CERT_THUMBPRINT: ${{ needs.windows-release-cert.outputs.thumbprint }}
+          EXPECTED_SUBJECT: ${{ needs.windows-release-cert.outputs.subject }}
         run: |
           $ErrorActionPreference = 'Stop'
           ./scripts/verify-windows-authenticode.ps1 `
             -PayloadDirectory signing/app `
             -Architecture ${{ matrix.arch }} `
             -DigestPath "$env:RUNNER_TEMP/payload-digest" `
-            -ExpectedThumbprint $env:CERTUM_KEY_ID `
+            -ExpectedThumbprint $env:SIGN_CERT_THUMBPRINT `
             -ExpectedSubject $env:EXPECTED_SUBJECT
           "digest=$(Get-Content -Raw "$env:RUNNER_TEMP/payload-digest")" >> $env:GITHUB_OUTPUT
 
@@ -712,8 +717,8 @@ jobs:
             -Architecture ${{ matrix.arch }}
 
   windows-sign-installer:
-    name: sign the Windows installer (Certum, ${{ matrix.arch }})
-    needs: [resolve, windows-package, windows-verify-package]
+    name: sign the Windows installer (self-signed, ${{ matrix.arch }})
+    needs: [resolve, windows-package, windows-verify-package, windows-release-cert]
     runs-on: windows-2022
     timeout-minutes: 30
     strategy:
@@ -725,7 +730,7 @@ jobs:
     permissions:
       contents: read
     concurrency:
-      group: certum-signing
+      group: windows-signing
       cancel-in-progress: false
     # The signed installer's hash, which publish requires of what it downloads.
     outputs:
@@ -738,36 +743,6 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-
-      # The switch is on, so nothing below may fall back to an unsigned build.
-      # Every missing value is reported under its own code before any fails.
-      - name: Require Certum configuration
-        shell: pwsh
-        env:
-          CERTUM_USERNAME: ${{ secrets.CERTUM_USERNAME }}
-          CERTUM_OTP_URI: ${{ secrets.CERTUM_OTP_URI }}
-          CERTUM_KEY_ID: ${{ secrets.CERTUM_KEY_ID }}
-          EXPECTED_SUBJECT: ${{ vars.STUDIO_SIGNING_SUBJECT }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $failed = $false
-          function Refuse([string]$code, [string]$message) {
-            Write-Output "::error title=$code::$message"
-            Set-Variable -Scope Script -Name failed -Value $true
-          }
-          if ([string]::IsNullOrWhiteSpace($env:CERTUM_USERNAME)) {
-            Refuse 'studio-signing.missing-username' 'Secret CERTUM_USERNAME is not set'
-          }
-          if ($env:CERTUM_OTP_URI -notmatch '^otpauth://totp/') {
-            Refuse 'studio-signing.invalid-otp-uri' 'Secret CERTUM_OTP_URI must be a complete otpauth://totp/ URI'
-          }
-          if ($env:CERTUM_KEY_ID -notmatch '^[0-9a-fA-F]{40}$') {
-            Refuse 'studio-signing.invalid-key-id' 'Secret CERTUM_KEY_ID must be the 40-character SHA-1 certificate thumbprint'
-          }
-          if ([string]::IsNullOrWhiteSpace($env:EXPECTED_SUBJECT)) {
-            Refuse 'studio-signing.subject-unset' 'Variable STUDIO_SIGNING_SUBJECT is empty; run the Studio Certum signing smoke test and copy the subject it reports'
-          }
-          if ($failed) { exit 1 }
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -796,38 +771,33 @@ jobs:
             if ($hash -cne $entry.Value) { throw "$($entry.Key) is not the file windows-verify-package checked" }
           }
 
-      - name: Connect to Certum
-        uses: ./.github/actions/setup-certum
-        with:
-          username: ${{ secrets.CERTUM_USERNAME }}
-          otp-uri: ${{ secrets.CERTUM_OTP_URI }}
-          thumbprint: ${{ secrets.CERTUM_KEY_ID }}
+      - name: Trust the release certificate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/sign-selfsigned.ps1 -Mode import `
+            -PfxPath "$env:RUNNER_TEMP/signing-cert/release-signing.pfx" `
+            -PasswordFilePath "$env:RUNNER_TEMP/signing-cert/release-signing.password"
 
       # Stage two: the NSIS container, only once the payload inside it is signed.
       - name: Sign the installer
         shell: pwsh
         env:
-          CERTUM_KEY_ID: ${{ secrets.CERTUM_KEY_ID }}
-        run: ./scripts/sign-certum.ps1 -FilePath dist/ReasonixStudio-windows-${{ matrix.arch }}-installer.exe
-
-      # The session signs for any process on the runner while it is up.
-      - name: Disconnect from Certum
-        if: always()
-        shell: pwsh
-        run: Get-Process -Name '*SimplySign*' -ErrorAction SilentlyContinue | Stop-Process -Force
+          SIGN_CERT_THUMBPRINT: ${{ needs.windows-release-cert.outputs.thumbprint }}
+        run: ./scripts/sign-selfsigned.ps1 -Mode sign-file -FilePath dist/ReasonixStudio-windows-${{ matrix.arch }}-installer.exe
 
       - name: Verify the installer signature
         id: signed
         shell: pwsh
         env:
-          CERTUM_KEY_ID: ${{ secrets.CERTUM_KEY_ID }}
-          EXPECTED_SUBJECT: ${{ vars.STUDIO_SIGNING_SUBJECT }}
+          SIGN_CERT_THUMBPRINT: ${{ needs.windows-release-cert.outputs.thumbprint }}
+          EXPECTED_SUBJECT: ${{ needs.windows-release-cert.outputs.subject }}
         run: |
           $ErrorActionPreference = 'Stop'
           $installer = 'dist/ReasonixStudio-windows-${{ matrix.arch }}-installer.exe'
           ./scripts/verify-windows-authenticode.ps1 `
             -FilePath $installer `
-            -ExpectedThumbprint $env:CERTUM_KEY_ID `
+            -ExpectedThumbprint $env:SIGN_CERT_THUMBPRINT `
             -ExpectedSubject $env:EXPECTED_SUBJECT
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
           "installer-sha256=$hash" >> $env:GITHUB_OUTPUT

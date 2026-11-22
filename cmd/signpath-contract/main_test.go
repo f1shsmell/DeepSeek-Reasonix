@@ -26,11 +26,11 @@ func TestTopLevelSignPathWorkflowCallGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The studio line signs from its release and its smoke test. Read from the
-	// call graph, not the contract, so a third workflow that learns to reach the
-	// signer fails here even if nobody widened the contract.
+	// Only the smoke test still reaches the signer service: the release signs
+	// with a certificate the run mints itself, which reaches no SignPath. Read
+	// from the call graph, not the contract, so a third workflow that learns to
+	// reach the signer fails here even if nobody widened the contract.
 	want := []string{
-		".github/workflows/release-studio.yml",
 		".github/workflows/studio-certum-signing-smoke.yml",
 	}
 	if !reflect.DeepEqual(got, want) {
