@@ -11,12 +11,15 @@ import (
 )
 
 // persistedShareState is what a share remembers across a restart: whether the
-// person had it open, and the address it was listening on. The address is kept
-// because a paired phone's credential rides a cookie scoped to the origin it
-// paired with, so reopening somewhere else makes every paired phone scan again —
-// the one thing this file exists to prevent.
+// person had it open, and the addresses it was answering on. The addresses are
+// kept because a paired phone's credential rides a cookie scoped to the origin
+// it paired with, so reopening somewhere else makes every paired phone scan
+// again — the one thing this file exists to prevent.
 type persistedShareState struct {
-	Open    bool   `json:"open"`
+	Open      bool     `json:"open"`
+	Addresses []string `json:"addresses,omitempty"`
+	// Address is the one-door spelling a state file carried before doors; a
+	// file that still holds one reads as a one-door share.
 	Address string `json:"address,omitempty"`
 }
 
@@ -44,6 +47,9 @@ func loadShareState(path string) persistedShareState {
 	var saved persistedShareState
 	if err := json.Unmarshal(raw, &saved); err != nil {
 		return persistedShareState{}
+	}
+	if len(saved.Addresses) == 0 && saved.Address != "" {
+		saved.Addresses = []string{saved.Address}
 	}
 	return saved
 }

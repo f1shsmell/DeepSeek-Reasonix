@@ -21,15 +21,28 @@ func lanOnly(t *testing.T, share *DeviceShare) {
 // records that it is shut.
 func TestShareStateRoundTrips(t *testing.T) {
 	path := filepath.Join(testenv.TempDir(t), "share-state.json")
-	if err := saveShareState(path, persistedShareState{Open: true, Address: "192.168.1.20"}); err != nil {
+	if err := saveShareState(path, persistedShareState{Open: true, Addresses: []string{"192.168.1.20", "100.64.0.1"}}); err != nil {
 		t.Fatal(err)
 	}
 	got := loadShareState(path)
-	if !got.Open || got.Address != "192.168.1.20" {
-		t.Fatalf("round trip = %+v, want open on 192.168.1.20", got)
+	if !got.Open || len(got.Addresses) != 2 || got.Addresses[0] != "192.168.1.20" {
+		t.Fatalf("round trip = %+v, want open on 192.168.1.20 and 100.64.0.1", got)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("state file missing: %v", err)
+	}
+}
+
+// TestAnOldStateFileReadsAsOneDoor covers the state a previous release wrote:
+// one remembered address, under the old key.
+func TestAnOldStateFileReadsAsOneDoor(t *testing.T) {
+	path := filepath.Join(testenv.TempDir(t), "share-state.json")
+	if err := os.WriteFile(path, []byte(`{"open":true,"address":"192.168.1.20"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := loadShareState(path)
+	if !got.Open || len(got.Addresses) != 1 || got.Addresses[0] != "192.168.1.20" {
+		t.Fatalf("old file read as %+v, want open on [192.168.1.20]", got)
 	}
 }
 
@@ -56,8 +69,9 @@ func TestOpeningTheShareRecordsItsAddress(t *testing.T) {
 	if _, err := share.Open("127.0.0.1"); err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if len(saved) == 0 || !saved[len(saved)-1].Open || saved[len(saved)-1].Address != "127.0.0.1" {
-		t.Fatalf("open recorded %+v, want open on 127.0.0.1", saved)
+	last := saved[len(saved)-1]
+	if !last.Open || len(last.Addresses) != 1 || last.Addresses[0] != "127.0.0.1" {
+		t.Fatalf("open recorded %+v, want open on [127.0.0.1]", saved)
 	}
 }
 
@@ -74,8 +88,8 @@ func TestClosingTheShareRecordsItShut(t *testing.T) {
 	}
 	share.Close()
 	last := saved[len(saved)-1]
-	if last.Open || last.Address != "" {
-		t.Fatalf("close recorded %+v, want shut with no address", last)
+	if last.Open || len(last.Addresses) != 0 {
+		t.Fatalf("close recorded %+v, want shut with no addresses", last)
 	}
 }
 
@@ -91,12 +105,12 @@ func TestReopenUsesTheRememberedAddress(t *testing.T) {
 	}
 	t.Cleanup(share.Close)
 
-	st, err := share.Reopen("127.0.0.1")
+	st, err := share.Reopen([]string{"127.0.0.1"})
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if !st.Open || !strings.HasPrefix(st.Origin, "http://127.0.0.1:") {
-		t.Fatalf("reopened on %q (open=%v), want the remembered 127.0.0.1", st.Origin, st.Open)
+	if !st.Open || !strings.HasPrefix(st.Doors[0].Origin, "http://127.0.0.1:") {
+		t.Fatalf("reopened on %+v (open=%v), want the remembered 127.0.0.1", st.Doors, st.Open)
 	}
 }
 
@@ -108,11 +122,11 @@ func TestReopenFallsBackWhenTheAddressIsGone(t *testing.T) {
 	share.Attach(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	t.Cleanup(share.Close)
 
-	st, err := share.Reopen("10.99.99.99")
+	st, err := share.Reopen([]string{"10.99.99.99"})
 	if err != nil {
 		t.Fatalf("reopen after a network change: %v", err)
 	}
-	if !st.Open || st.Origin == "" {
+	if !st.Open || len(st.Doors) != 1 {
 		t.Fatalf("fallback left the share shut: %+v", st)
 	}
 }

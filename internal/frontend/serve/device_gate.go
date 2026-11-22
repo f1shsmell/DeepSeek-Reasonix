@@ -37,6 +37,11 @@ type DeviceGateOptions struct {
 	// http://192.168.1.20:41234. Requests addressed to any other name are
 	// refused, which is what stops a rebinding page from borrowing the socket.
 	Origin string
+	// PublicOrigin names the reverse proxy standing in front of this listener,
+	// when there is one: the https name phones dial from anywhere. Only the
+	// door the proxy dials carries it, and it is what admits a request whose
+	// Host and Origin both name the proxy.
+	PublicOrigin string
 	// Page is the built frontend. Its files are public here, because a device
 	// that has not paired yet needs the page to pair from.
 	Page fs.FS
@@ -64,18 +69,29 @@ func NewDeviceGate(next http.Handler, opts DeviceGateOptions) http.Handler {
 			refuse(w, http.StatusInternalServerError, codeDeviceMisconfig, "this gate was built without an origin and a registry", nil)
 		})
 	}
+	public, publicAuthority := "", ""
+	if opts.PublicOrigin != "" {
+		if p, pAuth, pok := devicePublicOrigin(opts.PublicOrigin); pok {
+			public, publicAuthority = p, pAuth
+			// The pairing cookie is scoped to the name the phone dialed. The
+			// public name is https — that is what a public one is — so the
+			// browser on it holds Secure cookies, and the plain door behind
+			// the proxy must flag the cookie it sets.
+			secure = true
+		}
+	}
 	reg := opts.Registry
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.EqualFold(r.Host, authority) {
+		if !strings.EqualFold(r.Host, authority) && !(publicAuthority != "" && strings.EqualFold(r.Host, publicAuthority)) {
 			refuse(w, http.StatusForbidden, codeDeviceHost, "this listener does not answer for that host", nil)
 			return
 		}
-		if !loopbackOriginAllowed(r, origin) {
+		if !deviceOriginAllowed(r, origin, public) {
 			refuse(w, http.StatusForbidden, codeDeviceOrigin, "that origin may not reach this listener", nil)
 			return
 		}
 		if r.URL.Path == PairPath {
-			pairDevice(w, r, reg, secure)
+			pairDevice(w, r, reg, secure, origin)
 			return
 		}
 		if c, err := r.Cookie(DeviceCookie); err == nil {
@@ -153,9 +169,10 @@ func devicePublicPath(r *http.Request, page fs.FS) bool {
 	return err == nil && !st.IsDir()
 }
 
-// pairDevice spends a pairing code. The code rides a JSON body rather than the
-// URL, so it never reaches a request line, a log or a referrer.
-func pairDevice(w http.ResponseWriter, r *http.Request, reg *DeviceRegistry, secure bool) {
+// pairDevice spends a pairing code minted for the door this gate answers
+// for. The code rides a JSON body rather than the URL, so it never reaches a
+// request line, a log or a referrer.
+func pairDevice(w http.ResponseWriter, r *http.Request, reg *DeviceRegistry, secure bool, door string) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodPost {
 		refuse(w, http.StatusMethodNotAllowed, "request.method_not_allowed", "that method is not accepted here", nil)
@@ -178,7 +195,7 @@ func pairDevice(w http.ResponseWriter, r *http.Request, reg *DeviceRegistry, sec
 		badBody(w)
 		return
 	}
-	credential, view, err := reg.Redeem(body.Code, r.UserAgent())
+	credential, view, err := reg.Redeem(door, body.Code, r.UserAgent())
 	if err != nil {
 		refuse(w, http.StatusForbidden, codeDevicePairing, "that pairing code is not valid; show a new one and scan again", nil)
 		return
@@ -213,4 +230,45 @@ func deviceOrigin(raw string) (origin, authority string, secure, ok bool) {
 		return "", "", false, false
 	}
 	return u.Scheme + "://" + u.Host, u.Host, u.Scheme == "https", true
+}
+
+// devicePublicOrigin reads the proxy's name: like deviceOrigin, but the port
+// may be the scheme's default and left unsaid — https://studio.example.com is
+// the common shape of a public name. The gate compares what a request actually
+// carried, so a name without a port matches a Host that omits one too.
+func devicePublicOrigin(raw string) (origin, authority string, ok bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.User != nil {
+		return "", "", false
+	}
+	return u.Scheme + "://" + u.Host, u.Host, true
+}
+
+// deviceOriginAllowed says what may name this listener as its origin. A read
+// may arrive without an origin — a top-level navigation sends none — but
+// anything that changes state must name the door itself, or the public name
+// standing in front of it, or — only when a public name stands there at all —
+// the tightened spelling a proxy that rewrites both Host and Origin leaves
+// behind: https://name arrives as https://door. The parts compare as they
+// are, ports and all, and the scheme may only tighten, never loosen; a page
+// naming another host over TLS buys nothing.
+func deviceOriginAllowed(r *http.Request, want, public string) bool {
+	sent := r.Header.Get("Origin")
+	if sent == "" {
+		return r.Method == http.MethodGet || r.Method == http.MethodHead
+	}
+	if sent == want || (public != "" && sent == public) {
+		return true
+	}
+	if public == "" {
+		return false
+	}
+	sentU, err1 := url.Parse(sent)
+	wantU, err2 := url.Parse(want)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return strings.EqualFold(sentU.Hostname(), wantU.Hostname()) &&
+		sentU.Port() == wantU.Port() &&
+		sentU.Scheme == "https" && wantU.Scheme == "http"
 }

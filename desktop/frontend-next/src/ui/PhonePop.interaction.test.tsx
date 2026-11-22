@@ -11,7 +11,13 @@ import type { ShareStatus } from "../port/share";
 afterEach(cleanup);
 
 const status = (open: boolean): ShareStatus => ({
-  open, addresses: [{ ip: "10.0.0.2", interface: "en0", kind: "lan" }], devices: [], cloudDevices: [],
+  open,
+  doors: open
+    ? [{ address: "10.0.0.2", interface: "en0", kind: "lan", origin: "http://10.0.0.2:50000" }]
+    : [],
+  addresses: [{ ip: "10.0.0.2", interface: "en0", kind: "lan" }],
+  devices: [],
+  cloudDevices: [],
 });
 
 function hubWith(reads: ShareStatus[], offerShare: () => Promise<unknown>) {
@@ -30,12 +36,10 @@ function hubWith(reads: ShareStatus[], offerShare: () => Promise<unknown>) {
 
 const closed = new HttpError(409, "share closed", { code: "share.closed" });
 
-// The door was open when the window last looked and shut elsewhere since:
-// opening the card reads first and does not ask a shut door for a code.
-it("does not ask for a code when the read on opening finds the door shut", async () => {
-  // Read on mount, read again as the open door starts being watched, then
-  // shut by the time the card opens.
-  const { hub, shareStatus } = hubWith([status(true), status(true), status(false)], () => Promise.reject(closed));
+// The card asks for no code of its own on opening: a LAN code is one
+// person's to spend, and its mint waits for the press on its own row.
+it("does not ask for a code on opening, whatever the read finds", async () => {
+  const { hub, shareStatus } = hubWith([status(true), status(true), status(true)], () => Promise.resolve({ url: "", qr: "", expires: "" }));
   render(<PhonePop hub={hub} />);
   await waitFor(() => expect(shareStatus).toHaveBeenCalledTimes(2));
   await userEvent.click(screen.getByRole("button", { name: "设备访问" }));
@@ -49,8 +53,30 @@ it("says a failed code request inside the card", async () => {
   const { hub } = hubWith([status(true)], () => Promise.reject(closed));
   render(<PhonePop hub={hub} />);
   await userEvent.click(await screen.findByRole("button", { name: "设备访问" }));
+  await userEvent.click(await screen.findByRole("button", { name: "显示配对二维码" }));
   const dialog = await screen.findByRole("dialog");
   await waitFor(() => expect(dialog.querySelector('[role="alert"]')?.textContent).toBe("手机访问已关闭，请先开启。"));
+});
+
+it("mints the code for the door its button names", async () => {
+  const two: ShareStatus = {
+    ...status(true),
+    doors: [
+      { address: "10.0.0.2", interface: "en0", kind: "lan", origin: "http://10.0.0.2:50000" },
+      { address: "100.101.7.3", interface: "Tailscale", kind: "tailnet", origin: "http://100.101.7.3:50000" },
+    ],
+    addresses: [
+      { ip: "10.0.0.2", interface: "en0", kind: "lan" },
+      { ip: "100.101.7.3", interface: "Tailscale", kind: "tailnet" },
+    ],
+  };
+  const { hub } = hubWith([two, two], () => Promise.resolve({ url: "", qr: "", expires: "" }));
+  render(<PhonePop hub={hub} />);
+  await userEvent.click(await screen.findByRole("button", { name: "设备访问" }));
+  const buttons = await screen.findAllByRole("button", { name: "显示配对二维码" });
+  expect(buttons).toHaveLength(2);
+  await userEvent.click(buttons[1]);
+  await waitFor(() => expect(hub.offerShare).toHaveBeenCalledWith("100.101.7.3"));
 });
 
 it("disconnects an Internet controller after the same two-step confirmation", async () => {
@@ -74,7 +100,7 @@ it("disconnects an Internet controller after the same two-step confirmation", as
   await waitFor(() => expect(revokeDevice).toHaveBeenCalledWith("cloud-a"));
 });
 
-it("shows the account-gated Internet QR before the optional LAN pairing code", async () => {
+it("shows the account-gated Internet QR, and asks no LAN code for it", async () => {
   const remote = {
     ...status(false),
     cloudRemote: { deviceId: "device-a", name: "Home Mac", online: true },

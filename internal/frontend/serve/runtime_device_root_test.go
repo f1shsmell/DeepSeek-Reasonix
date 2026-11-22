@@ -24,8 +24,8 @@ func TestADeviceOpensOnlyFoldersTheWindowAlreadyListsAsRuntimes(t *testing.T) {
 	elsewhere := testenv.TempDir(t)
 
 	reg := NewDeviceRegistry()
-	code, _ := reg.Offer()
-	cred, _, err := reg.Redeem(code, "phone")
+	code, _ := reg.Offer(testDoor)
+	cred, _, err := reg.Redeem(testDoor, code, "phone")
 	if err != nil {
 		t.Fatal(err)
 	}
